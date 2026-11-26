@@ -1,9 +1,7 @@
 # Push a tag like v0.1.0 to build FoxGit for macOS, Windows and Linux and create a draft
 # GitHub Release with the downloads. Review the draft on GitHub, then press "Publish".
 #
-# Optional repository settings:
-#   Variable FOXGIT_GITHUB_CLIENT_ID   OAuth App client ID for "Sign in with GitHub"
-#   Secrets (macOS signing + notarization, needs an Apple Developer account):
+# Optional repository secrets (macOS signing + notarization, needs an Apple Developer account):
 #     MACOS_CERTIFICATE            base64 of a "Developer ID Application" .p12
 #     MACOS_CERTIFICATE_PASSWORD   password of that .p12
 #     MACOS_SIGN_IDENTITY          e.g. "Developer ID Application: Name (TEAMID)"
@@ -20,7 +18,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  FOXGIT_GITHUB_CLIENT_ID: ${{ vars.FOXGIT_GITHUB_CLIENT_ID }}
 
 jobs:
   version:

@@ -358,8 +358,6 @@ struct Saved {
     /// GitHub login whose token is in the keychain (the token itself is never written here).
     #[serde(default)]
     github_login: Option<String>,
-    #[serde(default)]
-    github_client_id: Option<String>,
     /// Folder the last clone went into.
     #[serde(default)]
     clone_parent: Option<String>,
@@ -499,11 +497,7 @@ impl FoxGitApp {
                 .unwrap_or_else(Instant::now),
             fetch_rx: None,
             fetch_manual: false,
-            github: GitHub::new(
-                &cc.egui_ctx,
-                saved.github_login.clone(),
-                saved.github_client_id.clone(),
-            ),
+            github: GitHub::new(&cc.egui_ctx, saved.github_login.clone()),
             clone_parent: saved.clone_parent.clone().unwrap_or_else(dirs_home),
             git_check: GitCheck::Found,
             show_about: false,
@@ -2170,7 +2164,6 @@ impl eframe::App for FoxGitApp {
             dark: Some(self.dark),
             auto_fetch_min: Some(self.auto_fetch_min),
             github_login: self.github.saved_login(),
-            github_client_id: self.github.saved_client_id(),
             clone_parent: Some(self.clone_parent.clone()),
             last_update_check: self.last_update_check,
         };

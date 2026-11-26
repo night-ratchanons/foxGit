@@ -1,16 +1,13 @@
-//! GitHub account UI: sign-in dialog, the toolbar account menu and the "Remote" page that
-//! lists every repository the account can access (Sourcetree-style) with a Clone button.
+//! GitHub account UI: personal-access-token sign-in, the toolbar account menu and the "Remote"
+//! page that lists every repository the account can access (Sourcetree-style) with Clone.
 
-use crate::github::{self, ApiError, DeviceCode, GhRepo, Poll, User};
+use crate::github::{self, ApiError, GhRepo, User};
 use crate::tabs::Project;
 use crate::theme::{self, pal};
 use eframe::egui;
 use egui::{pos2, vec2, FontId, Rect, RichText, Sense, Stroke};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 const GITHUB_GLYPH: char = egui::special_emojis::GITHUB;
 
@@ -36,23 +33,14 @@ enum Msg {
         user: Result<User, ApiError>,
         keychain: Result<(), String>,
     },
-    Device(Result<DeviceCode, String>),
-    DeviceDone(Result<String, String>),
     Repos(Result<Vec<GhRepo>, ApiError>),
 }
 
-enum SignIn {
-    Start {
-        pat: String,
-        error: Option<String>,
-        busy: bool,
-    },
-    Device {
-        code: DeviceCode,
-        started: Instant,
-        copied: bool,
-        finishing: bool,
-    },
+/// State of the "Connect GitHub" dialog.
+struct SignIn {
+    token: String,
+    error: Option<String>,
+    busy: bool,
 }
 
 pub enum MenuAction {
@@ -71,13 +59,11 @@ pub struct GitHub {
     pub account: Option<Account>,
     /// Login being restored from the keychain at startup.
     restoring: Option<String>,
-    pub client_id: String,
     repos: Vec<GhRepo>,
     repos_loaded: bool,
     repos_loading: bool,
     repos_error: Option<String>,
     dialog: Option<SignIn>,
-    cancel: Arc<AtomicBool>,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     ctx: egui::Context,
@@ -87,22 +73,16 @@ pub struct GitHub {
 }
 
 impl GitHub {
-    pub fn new(ctx: &egui::Context, login: Option<String>, client_id: Option<String>) -> Self {
+    pub fn new(ctx: &egui::Context, login: Option<String>) -> Self {
         let (tx, rx) = channel();
-        let client_id = client_id
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| github::BUILTIN_CLIENT_ID.map(String::from))
-            .unwrap_or_default();
         let gh = Self {
             account: None,
             restoring: login.clone(),
-            client_id,
             repos: Vec::new(),
             repos_loaded: false,
             repos_loading: false,
             repos_error: None,
             dialog: None,
-            cancel: Arc::new(AtomicBool::new(false)),
             tx,
             rx,
             ctx: ctx.clone(),
@@ -140,12 +120,6 @@ impl GitHub {
             .or_else(|| self.restoring.clone())
     }
 
-    /// Client ID to persist (only when it differs from the built-in one).
-    pub fn saved_client_id(&self) -> Option<String> {
-        let id = self.client_id.trim();
-        (!id.is_empty() && Some(id) != github::BUILTIN_CLIENT_ID).then(|| id.to_string())
-    }
-
     pub fn invalidate_local(&mut self) {
         self.local = None;
     }
@@ -159,8 +133,8 @@ impl GitHub {
     }
 
     pub fn open_signin(&mut self) {
-        self.dialog = Some(SignIn::Start {
-            pat: String::new(),
+        self.dialog = Some(SignIn {
+            token: String::new(),
             error: None,
             busy: false,
         });
@@ -191,6 +165,7 @@ impl GitHub {
         self.spawn(move |_| Some(Msg::Repos(github::list_repos(&token))));
     }
 
+    /// Check the token with GitHub, then keep it in the keychain.
     fn verify_and_store(&mut self, token: String) {
         self.spawn(move |_| {
             let user = github::fetch_user(&token);
@@ -203,53 +178,6 @@ impl GitHub {
                 user,
                 keychain,
             })
-        });
-    }
-
-    fn start_device(&mut self) {
-        let client_id = self.client_id.trim().to_string();
-        if let Some(SignIn::Start { busy, error, .. }) = &mut self.dialog {
-            *busy = true;
-            *error = None;
-        }
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = cancel.clone();
-        self.spawn(move |tx| {
-            let code = match github::device_start(&client_id) {
-                Ok(c) => c,
-                Err(e) => return Some(Msg::Device(Err(e))),
-            };
-            let _ = tx.send(Msg::Device(Ok(code.clone())));
-            let mut interval = code.interval.max(5);
-            let deadline = Instant::now() + Duration::from_secs(code.expires_in);
-            loop {
-                // sleep in small steps so Cancel takes effect quickly
-                for _ in 0..interval * 4 {
-                    if cancel.load(Ordering::Relaxed) {
-                        return None;
-                    }
-                    std::thread::sleep(Duration::from_millis(250));
-                }
-                if Instant::now() > deadline {
-                    return Some(Msg::DeviceDone(Err(
-                        "The code expired — start the sign-in again".into(),
-                    )));
-                }
-                match github::device_poll(&client_id, &code.device_code) {
-                    Poll::Pending => {}
-                    Poll::SlowDown => interval += 5,
-                    Poll::Token(t) => return Some(Msg::DeviceDone(Ok(t))),
-                    Poll::Failed(e) => return Some(Msg::DeviceDone(Err(e))),
-                }
-            }
-        });
-    }
-
-    fn show_error(&mut self, e: String) {
-        self.dialog = Some(SignIn::Start {
-            pat: String::new(),
-            error: Some(e),
-            busy: false,
         });
     }
 
@@ -268,7 +196,7 @@ impl GitHub {
                             problem: None,
                         }),
                         Err(e) => self.notes.push((
-                            format!("GitHub: the saved sign-in could not be read from the keychain ({e}). Sign in again."),
+                            format!("GitHub: the saved token could not be read from the keychain ({e}). Connect again."),
                             false,
                         )),
                     }
@@ -284,8 +212,10 @@ impl GitHub {
                                 a.problem = None;
                             }
                             Err(ApiError::Auth(m)) => {
-                                self.notes
-                                    .push((format!("GitHub: {m}. Sign in again."), false));
+                                self.notes.push((
+                                    format!("GitHub: {m}. Connect again with a new token."),
+                                    false,
+                                ));
                                 a.problem = Some(m);
                             }
                             Err(ApiError::Other(m)) => a.problem = Some(m),
@@ -317,47 +247,22 @@ impl GitHub {
                             problem: None,
                         });
                         self.notes
-                            .push((format!("Signed in to GitHub as {login}"), true));
+                            .push((format!("Connected to GitHub as {login}"), true));
                         if let Err(e) = keychain {
                             self.notes.push((
-                                format!("The token could not be saved to the keychain ({e}) — you will need to sign in again next time"),
+                                format!("The token could not be saved to the keychain ({e}) — you will need to paste it again next time"),
                                 false,
                             ));
                         }
                         self.reload_repos();
                     }
-                    Err(e) => self.show_error(e.to_string()),
+                    Err(e) => {
+                        if let Some(d) = &mut self.dialog {
+                            d.busy = false;
+                            d.error = Some(e.to_string());
+                        }
+                    }
                 },
-                Msg::Device(res) => {
-                    if self.cancel.load(Ordering::Relaxed) || self.dialog.is_none() {
-                        continue;
-                    }
-                    match res {
-                        Ok(code) => {
-                            self.dialog = Some(SignIn::Device {
-                                code,
-                                started: Instant::now(),
-                                copied: false,
-                                finishing: false,
-                            })
-                        }
-                        Err(e) => self.show_error(e),
-                    }
-                }
-                Msg::DeviceDone(res) => {
-                    if self.cancel.load(Ordering::Relaxed) || self.dialog.is_none() {
-                        continue;
-                    }
-                    match res {
-                        Ok(token) => {
-                            if let Some(SignIn::Device { finishing, .. }) = &mut self.dialog {
-                                *finishing = true;
-                            }
-                            self.verify_and_store(token);
-                        }
-                        Err(e) => self.show_error(e),
-                    }
-                }
                 Msg::Repos(res) => {
                     self.repos_loading = false;
                     if self.account.is_none() {
@@ -379,190 +284,120 @@ impl GitHub {
     // ------------------------------------------------------------------ sign-in dialog
 
     pub fn dialog_ui(&mut self, ctx: &egui::Context) {
-        let Some(state) = &mut self.dialog else {
+        let Some(d) = &mut self.dialog else {
             return;
         };
         let mut close = false;
-        let mut start_device = false;
-        let mut submit_pat: Option<String> = None;
-        let client_id = &mut self.client_id;
+        let mut submit: Option<String> = None;
 
         egui::Modal::new(egui::Id::unique("github_signin")).show(ctx, |ui| {
             ui.set_width(480.0);
             let p = pal(ui);
             ui.horizontal(|ui| {
-                ui.label(RichText::new(GITHUB_GLYPH.to_string()).size(30.0).color(p.text_strong));
+                ui.label(
+                    RichText::new(GITHUB_GLYPH.to_string())
+                        .size(30.0)
+                        .color(p.text_strong),
+                );
                 ui.vertical(|ui| {
-                    ui.label(RichText::new("Connect GitHub").size(18.0).strong().color(p.text_strong));
                     ui.label(
-                        RichText::new("Used for push · pull · fetch over HTTPS and to list the repositories you can clone.")
-                            .weak(),
+                        RichText::new("Connect GitHub")
+                            .size(18.0)
+                            .strong()
+                            .color(p.text_strong),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "Paste a personal access token. FoxGit uses it for push · pull · fetch \
+                             over HTTPS and to list the repositories you can clone.",
+                        )
+                        .weak(),
                     );
                 });
             });
             ui.add_space(12.0);
 
-            match state {
-                SignIn::Start { pat, error, busy } => {
-                    card(ui, |ui| {
-                        ui.label(RichText::new("Sign in with your browser").strong().color(p.text_strong));
-                        ui.label(
-                            RichText::new("You get a one-time code to enter on github.com — no password is typed here.")
-                                .small()
-                                .weak(),
-                        );
-                        ui.add_space(8.0);
-                        let has_id = !client_id.trim().is_empty();
-                        ui.horizontal(|ui| {
-                            if theme::primary_button(ui, &format!("{GITHUB_GLYPH}  Sign in with GitHub"), has_id && !*busy)
-                                .clicked()
-                            {
-                                start_device = true;
-                            }
-                            if *busy {
-                                ui.add(egui::Spinner::new());
-                            }
-                        });
-                        ui.add_space(4.0);
-                        egui::CollapsingHeader::new(RichText::new("OAuth App client ID").small())
-                            .id_salt("gh_client_id")
-                            .default_open(!has_id)
-                            .show(ui, |ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(client_id)
-                                        .hint_text("e.g. Ov23li…")
-                                        .desired_width(f32::INFINITY),
-                                );
-                                ui.label(
-                                    RichText::new(
-                                        "One-time setup: register an OAuth App on GitHub (any homepage / callback URL, \
-                                         e.g. http://localhost), tick \u{201C}Enable Device Flow\u{201D}, then paste its Client ID here.",
-                                    )
-                                    .small()
-                                    .weak(),
-                                );
-                                if ui.link("Register a new OAuth App on GitHub").clicked() {
-                                    ui.ctx().open_url(egui::OpenUrl::new_tab(github::NEW_OAUTH_APP_URL));
-                                }
-                            });
-                    });
-                    ui.add_space(8.0);
-                    card(ui, |ui| {
-                        ui.label(RichText::new("Or use a personal access token").strong().color(p.text_strong));
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            let r = ui.add(
-                                egui::TextEdit::singleline(pat)
-                                    .password(true)
-                                    .hint_text("ghp_…  or  github_pat_…")
-                                    .desired_width(ui.available_width() - 96.0),
-                            );
-                            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            let ok = !pat.trim().is_empty() && !*busy;
-                            if (ui.add_enabled(ok, egui::Button::new("Connect").min_size(vec2(84.0, 0.0))).clicked()
-                                || enter)
-                                && ok
-                            {
-                                submit_pat = Some(pat.trim().to_string());
-                                *busy = true;
-                                *error = None;
-                            }
-                        });
-                        ui.label(
-                            RichText::new("A classic token with the repo, read:org and workflow scopes, or a fine-grained token.")
-                                .small()
-                                .weak(),
-                        );
-                        if ui.link("Create a token on GitHub").clicked() {
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(github::NEW_TOKEN_URL));
-                        }
-                    });
-                    if let Some(e) = error {
-                        ui.add_space(8.0);
-                        ui.label(RichText::new(e.as_str()).color(p.red));
+            card(ui, |ui| {
+                step(ui, "1", "Create a token on GitHub");
+                ui.horizontal(|ui| {
+                    ui.add_space(28.0);
+                    if ui.link("Classic token").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(github::NEW_TOKEN_URL));
                     }
-                    ui.add_space(12.0);
+                    ui.label(RichText::new("·").weak());
+                    if ui.link("Fine-grained token").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(github::NEW_FINE_GRAINED_TOKEN_URL));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(28.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Classic: the link pre-ticks repo, read:org and workflow. \
+                                 Fine-grained: pick the repositories (or organization) and allow \
+                                 Contents: Read and write.",
+                            )
+                            .small()
+                            .weak(),
+                        )
+                        .wrap(),
+                    );
+                });
+                ui.add_space(8.0);
+                step(ui, "2", "Paste it here");
+                ui.horizontal(|ui| {
+                    ui.add_space(28.0);
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut d.token)
+                            .password(true)
+                            .hint_text("ghp_…  or  github_pat_…")
+                            .desired_width(ui.available_width() - 96.0),
+                    );
+                    if !d.busy && d.token.is_empty() && !r.has_focus() {
+                        r.request_focus();
+                    }
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let ok = !d.token.trim().is_empty() && !d.busy;
+                    if (theme::primary_button(ui, "Connect", ok).clicked() || enter) && ok {
+                        submit = Some(d.token.trim().to_string());
+                        d.busy = true;
+                        d.error = None;
+                    }
+                });
+                if d.busy {
                     ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            close = true;
-                        }
-                        ui.label(RichText::new("The token is stored in the system keychain.").small().weak());
+                        ui.add_space(28.0);
+                        ui.add(egui::Spinner::new().size(14.0));
+                        ui.label(RichText::new("Checking the token with GitHub…").weak());
                     });
                 }
-                SignIn::Device {
-                    code,
-                    started,
-                    copied,
-                    finishing,
-                } => {
-                    ui.label("Enter this code on GitHub:");
-                    ui.add_space(6.0);
-                    egui::Frame::new()
-                        .fill(p.input)
-                        .stroke(Stroke::new(1.0, p.border_strong))
-                        .corner_radius(10.0)
-                        .inner_margin(egui::Margin::symmetric(16, 12))
-                        .show(ui, |ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    RichText::new(&code.user_code)
-                                        .monospace()
-                                        .size(30.0)
-                                        .strong()
-                                        .color(p.text_strong),
-                                );
-                            });
-                        });
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        if theme::primary_button(ui, "Copy code & open GitHub", !*finishing).clicked() {
-                            ui.ctx().copy_text(code.user_code.clone());
-                            ui.ctx().open_url(egui::OpenUrl::new_tab(&code.verification_uri));
-                            *copied = true;
-                        }
-                        if ui.button("Copy code").clicked() {
-                            ui.ctx().copy_text(code.user_code.clone());
-                            *copied = true;
-                        }
-                    });
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        ui.add(egui::Spinner::new());
-                        if *finishing {
-                            ui.label(RichText::new("Approved — finishing sign-in…").weak());
-                        } else {
-                            let left = code.expires_in.saturating_sub(started.elapsed().as_secs());
-                            ui.label(
-                                RichText::new(format!(
-                                    "Waiting for you to approve on GitHub…  ({}:{:02} left)",
-                                    left / 60,
-                                    left % 60
-                                ))
-                                .weak(),
-                            );
-                        }
-                    });
-                    if *copied {
-                        ui.label(RichText::new("Code copied to the clipboard.").small().weak());
-                    }
-                    ui.add_space(12.0);
-                    if ui.button("Cancel").clicked() {
-                        close = true;
-                    }
-                    ui.ctx().request_repaint_after(Duration::from_secs(1));
-                }
+            });
+            if let Some(e) = &d.error {
+                ui.add_space(8.0);
+                ui.label(RichText::new(e.as_str()).color(p.red));
             }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+                ui.label(
+                    RichText::new("The token is stored in the system keychain, never in a file.")
+                        .small()
+                        .weak(),
+                );
+            });
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close = true;
             }
         });
 
         if close {
-            self.cancel.store(true, Ordering::Relaxed);
             self.dialog = None;
-        } else if start_device {
-            self.start_device();
-        } else if let Some(t) = submit_pat {
+        } else if let Some(t) = submit {
             self.verify_and_store(t);
         }
     }
@@ -615,7 +450,7 @@ impl GitHub {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(&a.html_url));
                 ui.close();
             }
-            if ui.button("Switch account…").clicked() {
+            if ui.button("Use a different token…").clicked() {
                 act = Some(MenuAction::SignIn);
                 ui.close();
             }
@@ -661,7 +496,9 @@ impl GitHub {
                             .weak(),
                     );
                     ui.add_space(12.0);
-                    if theme::primary_button(ui, &format!("{GITHUB_GLYPH}  Connect GitHub"), true).clicked() {
+                    if theme::primary_button(ui, &format!("{GITHUB_GLYPH}  Connect with a token"), true)
+                        .clicked()
+                    {
                         ev.push(RemoteEvent::SignIn);
                     }
                     ui.add_space(10.0);
@@ -797,7 +634,7 @@ impl GitHub {
             );
             if q.is_empty() {
                 ui.label(
-                    RichText::new("Organization repositories are hidden until the organization allows this OAuth App (Settings → Third-party access), or use a token with access to them.")
+                    RichText::new("Organization repositories only show up if the token can access them: for a fine-grained token pick the organization as resource owner; for a classic token on an SSO organization click Configure SSO → Authorize next to the token.")
                         .small()
                         .weak(),
                 );
@@ -819,6 +656,25 @@ impl GitHub {
             });
         ev
     }
+}
+
+/// A numbered step heading in the sign-in dialog.
+fn step(ui: &mut egui::Ui, n: &str, title: &str) {
+    let p = pal(ui);
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::hover());
+        ui.painter()
+            .circle_filled(r.center(), 10.0, theme::alpha(p.accent, 0.22));
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            n,
+            FontId::proportional(11.5),
+            p.accent_hover,
+        );
+        ui.add_space(4.0);
+        ui.label(RichText::new(title).strong().color(p.text_strong));
+    });
 }
 
 /// Rounded panel used for grouped content in dialogs and empty states.

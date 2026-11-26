@@ -10,15 +10,7 @@
    ไม่ต้องแก้ชื่อ repo ในโค้ด ตอน build บน GitHub Actions ลิงก์ About / Report a problem / ตัวเช็กอัปเดต
    จะใช้ชื่อ repo ที่ build อยู่ให้เอง (`GITHUB_REPOSITORY`)
 
-2. **OAuth App สำหรับปุ่ม "Sign in with GitHub"** (ถ้าไม่ทำ ผู้ใช้ยังล็อกอินด้วย Personal Access Token ได้)
-   - ไปที่ https://github.com/settings/applications/new
-   - Application name: `FoxGit` (ชื่อนี้ผู้ใช้จะเห็นตอนกดอนุญาต)
-   - Homepage URL: หน้า repo, Authorization callback URL: `http://localhost` (ไม่ได้ใช้จริง)
-   - กด Register แล้วติ๊ก **Enable Device Flow** → Save
-   - คัดลอก **Client ID** ไปใส่ที่ repo → Settings → Secrets and variables → Actions → **Variables** →
-     New variable ชื่อ `FOXGIT_GITHUB_CLIENT_ID` (client ID ของ device flow ไม่ใช่ความลับ ไม่ต้องมี client secret)
-
-3. **(ไม่บังคับ) Sign + notarize บน macOS** — ต้องมี Apple Developer Program ($99/ปี)
+2. **(ไม่บังคับ) Sign + notarize บน macOS** — ต้องมี Apple Developer Program ($99/ปี)
    ถ้าไม่ทำ ผู้ใช้ macOS ต้องคลิกขวา → Open ตอนเปิดครั้งแรก
    - สร้างใบรับรอง **Developer ID Application** แล้ว export เป็น `.p12`
    - ใส่ Secrets: `MACOS_CERTIFICATE` (= `base64 -i cert.p12 | pbcopy`), `MACOS_CERTIFICATE_PASSWORD`,

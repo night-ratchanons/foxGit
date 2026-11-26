@@ -13,8 +13,8 @@ First public release.
 - Commit graph with branch / remote / tag badges, search, and resizable columns.
 - Branches grouped into folders by their `/` prefix (`feature/…`, `fix/…`), local and remote.
 - Stage, unstage and discard whole files, single hunks or individual lines.
-- GitHub account: sign in with the browser (device code) or a personal access token; the token
-  is kept in the system keychain and used automatically for HTTPS remotes on github.com.
+- GitHub account: connect with a personal access token; it is kept in the system keychain and
+  used automatically for HTTPS remotes on github.com.
 - Projects → Remote: every repository your GitHub account can access, with one-click Clone.
 - New dark theme (default) and a matching light theme.
 

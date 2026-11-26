@@ -43,7 +43,7 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | **Commit** | Amend, "Commit & Push" ทีเดียว, ⌘/Ctrl + Enter |
 | **Branch / Remote** | สร้าง, checkout, merge, rebase, ลบ, push (ตั้ง upstream / force-with-lease), pull (merge/rebase), fetch, clone, auto-fetch ทุกแท็บใน background |
 | **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
-| **บัญชี GitHub** | Sign in ผ่านเบราว์เซอร์หรือวาง Personal Access Token เก็บใน Keychain ของระบบ push/pull ไป github.com ไม่ต้องใส่รหัสอีก |
+| **บัญชี GitHub** | กด **Sign in** แล้ววาง Personal Access Token (มีลิงก์สร้าง token ที่ติ๊กสิทธิ์ให้แล้ว) เก็บใน Keychain ของระบบ push/pull ไป github.com ไม่ต้องใส่รหัสอีก |
 | **Clone จาก GitHub** | หน้า **Projects → Remote** แสดง repo ทั้งหมดที่บัญชีมีสิทธิ์ (ของตัวเอง, org, ที่เป็น collaborator) ค้นหาแล้วกด Clone ได้เลย |
 | **อื่น ๆ** | Stash, Tag, ธีมมืด/สว่าง, หน้าต่าง Log ดู output ของ git, ถาม passphrase/รหัสผ่านผ่านหน้าต่าง, ภาษาไทยแสดงผลได้ |
 
@@ -99,7 +99,7 @@ src/
 ├── diffview.rs    ตัวแสดง diff + stage ทีละ hunk/บรรทัด
 ├── graph.rs       อัลกอริทึมจัดเลนของกราฟ commit
 ├── git.rs         backend: อ่านด้วย libgit2, เขียนด้วย git CLI
-├── github.rs      GitHub API, device flow, Keychain, credential ให้ git
+├── github.rs      GitHub API, Keychain, credential ให้ git
 ├── account.rs     หน้าต่าง Sign in, เมนูบัญชี, หน้า Remote
 ├── askpass.rs     หน้าต่างถามรหัสผ่านให้ git/ssh
 ├── shellenv.rs    PATH จาก login shell + ตรวจว่ามี git
@@ -114,7 +114,7 @@ src/
 - เปิดโปรแกรมซ้ำจะได้หน้าต่างใหม่ (ยังไม่มีโหมดหน้าต่างเดียว)
 - stage ทีละ hunk/บรรทัดได้เฉพาะไฟล์ที่แก้ไข (ไฟล์ใหม่/ลบ/conflict ต้อง stage ทั้งไฟล์)
 - ไม่รองรับ bare repository
-- repo ของ org ที่จำกัดสิทธิ์ OAuth App จะไม่ขึ้นในหน้า Remote จนกว่า org จะอนุญาต (หรือใช้ token แทน)
+- repo ของ org จะขึ้นในหน้า Remote เฉพาะเมื่อ token มีสิทธิ์เข้าถึง (fine-grained token: เลือก org เป็น resource owner, classic token ของ org ที่ใช้ SSO: กด Configure SSO → Authorize ที่ token นั้น)
 
 ## License
 

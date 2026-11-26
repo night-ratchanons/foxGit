@@ -1,6 +1,6 @@
-//! GitHub backend: sign-in (OAuth device flow or personal access token), token storage in the
-//! OS keychain, listing the repositories the account can access, and handing the token to git
-//! for HTTPS remotes on github.com.
+//! GitHub backend: personal-access-token sign-in, token storage in the OS keychain, listing the
+//! repositories the account can access, and handing the token to git for HTTPS remotes on
+//! github.com.
 //!
 //! All functions here block on the network — call them from a background thread.
 
@@ -12,14 +12,12 @@ const API: &str = "https://api.github.com";
 const KEYCHAIN_SERVICE: &str = "FoxGit GitHub";
 /// Where tokens were kept before the app was renamed (moved over on first read).
 const LEGACY_KEYCHAIN_SERVICE: &str = "RustTree GitHub";
-/// `repo` for private repositories, `read:org` to see organization repositories,
-/// `workflow` so pushes that touch `.github/workflows` are accepted.
-pub const SCOPES: &str = "repo read:org workflow";
-/// OAuth App client ID baked in at build time (`FOXGIT_GITHUB_CLIENT_ID=… cargo build`).
-pub const BUILTIN_CLIENT_ID: Option<&str> = option_env!("FOXGIT_GITHUB_CLIENT_ID");
+/// Classic token with the scopes FoxGit needs pre-ticked: `repo` (private repositories),
+/// `read:org` (organization repositories) and `workflow` (pushes that touch .github/workflows).
 pub const NEW_TOKEN_URL: &str =
     "https://github.com/settings/tokens/new?scopes=repo,read:org,workflow&description=FoxGit";
-pub const NEW_OAUTH_APP_URL: &str = "https://github.com/settings/applications/new";
+pub const NEW_FINE_GRAINED_TOKEN_URL: &str =
+    "https://github.com/settings/personal-access-tokens/new";
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
@@ -45,22 +43,6 @@ pub struct GhRepo {
     pub clone_url: String,
     pub ssh_url: String,
     pub html_url: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct DeviceCode {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
-pub enum Poll {
-    Pending,
-    SlowDown,
-    Token(String),
-    Failed(String),
 }
 
 #[derive(Debug)]
@@ -148,69 +130,6 @@ pub fn list_repos(token: &str) -> Result<Vec<GhRepo>, ApiError> {
     all.sort_by_key(|r| r.full_name.to_lowercase());
     all.dedup_by(|a, b| a.full_name == b.full_name);
     Ok(all)
-}
-
-fn post_form(url: &str, form: &[(&str, &str)]) -> Result<serde_json::Value, String> {
-    let mut r = agent()
-        .post(url)
-        .header("Accept", "application/json")
-        .send_form(form.iter().copied())
-        .map_err(|e| format!("Network error: {e}"))?;
-    let status = r.status().as_u16();
-    let body = r.body_mut().read_to_string().map_err(|e| e.to_string())?;
-    serde_json::from_str(&body).map_err(|_| match status {
-        404 => "GitHub doesn't know this client ID — check it in your OAuth App settings".into(),
-        _ => format!("GitHub returned HTTP {status}"),
-    })
-}
-
-/// Step 1 of the device flow: get a code for the user to enter on github.com/login/device.
-pub fn device_start(client_id: &str) -> Result<DeviceCode, String> {
-    let v = post_form(
-        "https://github.com/login/device/code",
-        &[("client_id", client_id), ("scope", SCOPES)],
-    )?;
-    if let Some(err) = v["error"].as_str() {
-        return Err(match err {
-            "device_flow_disabled" => {
-                "Device Flow is off for this OAuth App — tick \"Enable Device Flow\" in its settings on GitHub".into()
-            }
-            "unauthorized_client" | "incorrect_client_credentials" | "Not Found" => {
-                "GitHub doesn't know this client ID — check it in your OAuth App settings".into()
-            }
-            _ => format!("{err}: {}", v["error_description"].as_str().unwrap_or("")),
-        });
-    }
-    serde_json::from_value(v).map_err(|e| e.to_string())
-}
-
-/// Step 2: ask whether the user has approved the code yet.
-pub fn device_poll(client_id: &str, device_code: &str) -> Poll {
-    let v = match post_form(
-        "https://github.com/login/oauth/access_token",
-        &[
-            ("client_id", client_id),
-            ("device_code", device_code),
-            ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-        ],
-    ) {
-        Ok(v) => v,
-        // transient network trouble: keep waiting
-        Err(_) => return Poll::Pending,
-    };
-    if let Some(t) = v["access_token"].as_str() {
-        return Poll::Token(t.to_string());
-    }
-    match v["error"].as_str() {
-        Some("authorization_pending") | None => Poll::Pending,
-        Some("slow_down") => Poll::SlowDown,
-        Some("expired_token") => Poll::Failed("The code expired — start the sign-in again".into()),
-        Some("access_denied") => Poll::Failed("Sign-in was cancelled on GitHub".into()),
-        Some(e) => Poll::Failed(format!(
-            "{e}: {}",
-            v["error_description"].as_str().unwrap_or("")
-        )),
-    }
 }
 
 // ---------------------------------------------------------------------------
