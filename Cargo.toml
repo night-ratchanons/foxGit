@@ -41,6 +41,7 @@ copyright = "2026, FoxGit contributors"
 license-file = ["LICENSE", "0"]
 extended-description = "A fast, friendly Git client with a commit graph, hunk and line staging, branch folders, project tabs and GitHub sign-in."
 section = "devel"
+revision = ""
 priority = "optional"
 depends = "$auto, git"
 assets = [
