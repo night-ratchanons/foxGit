@@ -3,6 +3,17 @@
 All notable changes to FoxGit. The release workflow copies the section of the tagged version
 into the GitHub Release notes.
 
+## [Unreleased]
+
+### New: AI agents in FoxGit
+- **AGENTS** in the sidebar → **New agent chat…**: give a task to **Claude Code**, **Codex** or
+  **Hermes** (whichever CLIs are installed) and chat with it. Each chat works in its own git
+  worktree on an `agent/…` branch, so your folder is never touched.
+- Live progress (what it says, files it edits, commands it runs), Stop, and replies at any time —
+  messages typed while it's busy wait in a queue; Claude Code and Hermes resume the same session.
+- **Review changes** opens the agent's copy as a tab (stage / discard hunks and lines as usual),
+  then **Merge into <branch>** (or squash into staged changes) or **Discard**.
+
 ## [0.1.0] - 2026-11-26
 
 First public release.

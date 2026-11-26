@@ -250,7 +250,12 @@ fn folder_row(
     side_row(ui, row)
 }
 
-pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
+pub fn sidebar(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    agent_rows: &[crate::agents::RowInfo],
+    actions: &mut Vec<Action>,
+) {
     let p = pal(ui);
     egui::Panel::left("sidebar")
         .resizable(true)
@@ -274,6 +279,10 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                     row.selected = tab.view == View::History;
                     if side_row(ui, row).clicked() {
                         tab.view = View::History;
+                    }
+
+                    if section(ui, "AGENTS", agent_rows.len()) {
+                        agents_section(ui, tab, agent_rows, actions);
                     }
 
                     let locals = tab.refs.locals.clone();
@@ -423,6 +432,57 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
 /// Where the app leaves the connected GitHub logins for [`remote_menu`] each frame.
 pub fn github_logins_id() -> egui::Id {
     egui::Id::unique("github_logins")
+}
+
+/// Chats with AI agents for this repository, plus "New chat…".
+fn agents_section(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    rows: &[crate::agents::RowInfo],
+    actions: &mut Vec<Action>,
+) {
+    use crate::agents::Status;
+    let p = pal(ui);
+    for r in rows {
+        let (icon, color) = match r.status {
+            Status::Running => ("⟳", p.accent_hover),
+            Status::Idle => ("●", p.green),
+            Status::Failed => ("⚠", p.red),
+            Status::Stopped => ("●", p.faint),
+            Status::Merged => ("✔", p.purple),
+        };
+        let mut row = SideRow::new(ui, icon, &r.title);
+        row.tree = true;
+        row.icon_color = color;
+        row.selected = tab.view == View::Agent(r.id);
+        if r.queued > 0 {
+            row.chips.push((format!("+{}", r.queued), p.accent_hover));
+        }
+        let tip = format!(
+            "{} · {}",
+            r.kind.name(),
+            match r.status {
+                Status::Running => "working",
+                Status::Idle => "waiting for your reply",
+                Status::Failed => "stopped with an error",
+                Status::Stopped => "stopped",
+                Status::Merged => "merged",
+            }
+        );
+        if side_row(ui, row).on_hover_text(tip).clicked() {
+            tab.view = View::Agent(r.id);
+        }
+    }
+    let mut row = SideRow::new(ui, "✨", "New agent chat…");
+    row.tree = true;
+    row.icon_color = p.accent_hover;
+    row.label_color = p.subtext;
+    if side_row(ui, row)
+        .on_hover_text("Ask Claude Code, Codex or Hermes to work on this repository")
+        .clicked()
+    {
+        actions.push(Action::NewAgentTask);
+    }
 }
 
 /// Right-click menu of a remote in the sidebar.

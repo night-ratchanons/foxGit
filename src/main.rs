@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows release builds
 
 mod account;
+mod agents;
 mod app;
 mod askpass;
 mod branchtree;

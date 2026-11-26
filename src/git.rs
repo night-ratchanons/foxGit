@@ -899,6 +899,21 @@ pub enum Op {
         url: Option<String>,
     },
     RemoteRemove(String),
+    /// Bring an agent's work in: commit what's uncommitted in its worktree, then merge (or
+    /// squash) its branch into the current branch of the main repository.
+    AgentMerge {
+        worktree: String,
+        branch: String,
+        message: String,
+        commit_first: bool,
+        squash: bool,
+    },
+    /// Delete an agent's worktree (and its branch).
+    AgentCleanup {
+        worktree: String,
+        branch: String,
+        delete_branch: bool,
+    },
     /// Stage / unstage / discard part of a file (hunks or individual lines).
     ApplyPatch {
         patch: Vec<u8>,
@@ -943,6 +958,10 @@ impl Op {
             Op::RemoteAdd { name, .. } => format!("Add remote {name}"),
             Op::RemoteEdit { name, .. } => format!("Edit remote {name}"),
             Op::RemoteRemove(name) => format!("Remove remote {name}"),
+            Op::AgentMerge { branch, squash, .. } => {
+                format!("{} {branch}", if *squash { "Squash" } else { "Merge" })
+            }
+            Op::AgentCleanup { branch, .. } => format!("Discard {branch}"),
             Op::ApplyPatch { label, .. } => label.clone(),
         }
     }
@@ -1098,6 +1117,42 @@ impl Op {
                 v
             }
             Op::RemoteRemove(name) => vec![(s(&["remote", "remove", name]), None)],
+            Op::AgentMerge {
+                worktree,
+                branch,
+                message,
+                commit_first,
+                squash,
+            } => {
+                let mut v = Vec::new();
+                if *commit_first {
+                    v.push((s(&["-C", worktree, "add", "-A"]), None));
+                    v.push((
+                        s(&["-C", worktree, "commit", "-F", "-"]),
+                        Some(message.clone().into_bytes()),
+                    ));
+                }
+                if *squash {
+                    v.push((s(&["merge", "--squash", branch]), None));
+                } else {
+                    v.push((
+                        s(&["merge", "--no-ff", "-m", &format!("Merge {branch}"), branch]),
+                        None,
+                    ));
+                }
+                v
+            }
+            Op::AgentCleanup {
+                worktree,
+                branch,
+                delete_branch,
+            } => {
+                let mut v = vec![(s(&["worktree", "remove", "--force", worktree]), None)];
+                if *delete_branch {
+                    v.push((s(&["branch", "-D", branch]), None));
+                }
+                v
+            }
             Op::ApplyPatch {
                 patch,
                 cached,
@@ -1481,6 +1536,44 @@ mod tests {
         let rm = Op::RemoteRemove("github".into()).run(d);
         assert!(rm.ok, "{}", rm.text);
         assert!(repo.refs().unwrap().remote_names.is_empty());
+    }
+
+    #[test]
+    fn agent_worktree_merge_and_cleanup() {
+        let t = setup();
+        let d = t.path();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = wt_dir.path().join("task");
+        let wts = wt.display().to_string();
+        git(d, &["worktree", "add", "-b", "agent/task", &wts, "main"]);
+        // the agent edits without committing
+        fs::write(wt.join("agent.txt"), "from the agent\n").unwrap();
+        let out = Op::AgentMerge {
+            worktree: wts.clone(),
+            branch: "agent/task".into(),
+            message: "Agent work\n".into(),
+            commit_first: true,
+            squash: false,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(
+            fs::read_to_string(d.join("agent.txt")).unwrap(),
+            "from the agent\n"
+        );
+        assert!(git_out(d, &["log", "-1", "--format=%s"]).contains("Merge agent/task"));
+
+        let out = Op::AgentCleanup {
+            worktree: wts.clone(),
+            branch: "agent/task".into(),
+            delete_branch: true,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert!(!wt.exists());
+        assert!(git_out(d, &["branch", "--list", "agent/task"])
+            .trim()
+            .is_empty());
     }
 
     #[test]

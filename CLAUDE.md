@@ -33,6 +33,7 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 | `src/branchtree.rs` | Groups branch names into folders by `/` prefix for the sidebar (pure, unit-tested). |
 | `src/github.rs` | GitHub backend: personal-access-token sign-in (the only sign-in method, by choice; several accounts), `/user/repos` listing, org list + repo creation, keychain storage (`keyring`), and `git_credential()` — URL-scoped `-c credential.https://github.com.helper` args injected by `run_git_ext`; the inline helper picks the token by the user name in the remote URL (`https://login@github.com/…`), else the active account (`FOXGIT_GH_USER_0`). |
 | `src/account.rs` | GitHub UI: sign-in modal, toolbar account menu, the Projects page "Remote" list with Clone/Open. |
+| `src/agents.rs` | AI agent chats (Claude Code `claude -p --output-format stream-json`, Codex `codex exec --json`, Hermes `hermes chat --format stream-json`): one git worktree + `agent/<slug>` branch per chat under `<app data>/worktrees`, CLI run headless per message (resuming the agent's session), JSON lines parsed into chat lines (`parse_line`, unit-tested with real Claude/Hermes lines; Codex shapes untested — not installed here), Review / Merge (`Op::AgentMerge`) / Discard (`Op::AgentCleanup`). |
 | `src/shellenv.rs` | Login-shell `PATH` for git child processes (apps started from Finder get a minimal PATH) + `git --version` check. |
 | `src/update.rs` | Update check against GitHub Releases of `FOXGIT_REPO` / `GITHUB_REPOSITORY` (set automatically in CI builds; dev builds don't check). |
 

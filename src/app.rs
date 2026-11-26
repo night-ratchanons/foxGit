@@ -1,6 +1,7 @@
 //! Application state, background jobs, toolbar, tabs and dialogs.
 
 use crate::account::{GitHub, MenuAction, RemoteEvent};
+use crate::agents;
 use crate::askpass::{self, AskRequest};
 use crate::git::{self, CommitInfo, DiffTarget, FileChange, FileDiff, Op, Refs, Repo, WorkStatus};
 use crate::github;
@@ -22,6 +23,8 @@ pub const DEFAULT_COMMIT_LIMIT: usize = 3000;
 pub enum View {
     FileStatus,
     History,
+    /// Chat with an AI agent task (id in `FoxGitApp::agents`).
+    Agent(u64),
 }
 
 type HistoryResult = Result<(Vec<CommitInfo>, Vec<GraphRow>), String>;
@@ -276,6 +279,14 @@ struct Job {
     tab_id: Option<u64>,
     dir: PathBuf,
     kind: JobKind,
+    after: Option<AfterJob>,
+}
+
+/// Bookkeeping to do when a job succeeds.
+#[derive(Clone, Copy)]
+enum AfterJob {
+    AgentMerged(u64),
+    AgentDiscarded(u64),
 }
 
 struct JobDone {
@@ -284,6 +295,7 @@ struct JobDone {
     ok: bool,
     text: String,
     open_after: Option<PathBuf>,
+    after: Option<AfterJob>,
 }
 
 pub struct LogEntry {
@@ -330,6 +342,13 @@ pub enum Dialog {
         text: String,
         op: Op,
         danger: bool,
+    },
+    /// Delete an agent's worktree + branch (and forget the chat).
+    DiscardAgent {
+        task: u64,
+        repo: PathBuf,
+        worktree: PathBuf,
+        branch: String,
     },
     AddRemote {
         name: String,
@@ -379,6 +398,8 @@ pub enum Action {
     AddRemote,
     /// Open the Edit remote dialog.
     EditRemote(String),
+    /// Start a chat with an AI agent in the active repository.
+    NewAgentTask,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +429,10 @@ struct Saved {
     /// Unix time of the last automatic update check.
     #[serde(default)]
     last_update_check: i64,
+    #[serde(default)]
+    agent_tasks: Vec<agents::SavedTask>,
+    #[serde(default)]
+    last_agent: Option<agents::AgentKind>,
 }
 
 /// Result of looking for `git` at startup.
@@ -479,6 +504,7 @@ pub struct FoxGitApp {
     last_update_check: i64,
     publish: Option<PendingPublish>,
     next_tag: u64,
+    agents: agents::Agents,
 }
 
 impl FoxGitApp {
@@ -561,6 +587,7 @@ impl FoxGitApp {
             last_update_check: saved.last_update_check,
             publish: None,
             next_tag: 1,
+            agents: agents::Agents::new(&cc.egui_ctx, saved.agent_tasks.clone(), saved.last_agent),
         };
         app.apply_theme(&cc.egui_ctx);
         app.start_git_check(&cc.egui_ctx);
@@ -820,7 +847,21 @@ impl FoxGitApp {
     }
 
     fn enqueue(&mut self, tab_id: Option<u64>, dir: PathBuf, kind: JobKind) {
-        self.queue.push_back(Job { tab_id, dir, kind });
+        self.queue.push_back(Job {
+            tab_id,
+            dir,
+            kind,
+            after: None,
+        });
+    }
+
+    fn enqueue_then(&mut self, tab_id: Option<u64>, dir: PathBuf, op: Op, after: AfterJob) {
+        self.queue.push_back(Job {
+            tab_id,
+            dir,
+            kind: JobKind::Op(op),
+            after: Some(after),
+        });
     }
 
     fn pump_jobs(&mut self, ctx: &egui::Context) {
@@ -854,6 +895,18 @@ impl FoxGitApp {
                     self.open_repo(&path);
                     self.github.invalidate_local();
                 }
+            }
+            match done.after {
+                Some(AfterJob::AgentMerged(id)) if done.ok => self.agents.mark_merged(id),
+                Some(AfterJob::AgentDiscarded(id)) if done.ok => {
+                    self.agents.remove(id);
+                    for t in &mut self.tabs {
+                        if t.view == View::Agent(id) {
+                            t.view = View::History;
+                        }
+                    }
+                }
+                _ => {}
             }
             if let Some(id) = done.tab_id {
                 if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
@@ -891,6 +944,7 @@ impl FoxGitApp {
                         ok: out.ok,
                         text: out.text,
                         open_after,
+                        after: job.after,
                     });
                     ctx.request_repaint();
                 });
@@ -915,6 +969,26 @@ impl FoxGitApp {
                     }
                 }
                 Action::AddRemote => self.open_add_remote(),
+                Action::NewAgentTask => {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        if tab.repo.is_head_unborn() {
+                            self.notify(
+                                "Make a first commit before starting an agent — it works on a copy of your branch".into(),
+                                false,
+                            );
+                        } else {
+                            let base = if tab.refs.head_detached {
+                                tab.refs
+                                    .head_oid
+                                    .map(|o| o.to_string())
+                                    .unwrap_or_else(|| "HEAD".into())
+                            } else {
+                                tab.refs.head_name.clone().unwrap_or_else(|| "HEAD".into())
+                            };
+                            self.agents.open_new(&tab.path, &tab.name, &base);
+                        }
+                    }
+                }
                 Action::EditRemote(name) => {
                     if let Some(tab) = self.tabs.get(self.active) {
                         let url = tab.refs.remote_urls.get(&name).cloned().unwrap_or_default();
@@ -930,6 +1004,56 @@ impl FoxGitApp {
                         tab.commit_limit *= 2;
                         tab.start_history_load(Some(ctx));
                     }
+                }
+            }
+        }
+    }
+
+    fn apply_agent_actions(&mut self, acts: Vec<agents::TaskAction>) {
+        for a in acts {
+            match a {
+                agents::TaskAction::Review(path) => self.open_repo(&path),
+                agents::TaskAction::Merge {
+                    task,
+                    repo,
+                    worktree,
+                    branch,
+                    message,
+                    commit_first,
+                    squash,
+                } => {
+                    let tab_id = self.tabs.iter().find(|t| t.path == repo).map(|t| t.id);
+                    self.enqueue_then(
+                        tab_id,
+                        repo,
+                        Op::AgentMerge {
+                            worktree: worktree.display().to_string(),
+                            branch,
+                            message,
+                            commit_first,
+                            squash,
+                        },
+                        AfterJob::AgentMerged(task),
+                    );
+                    if squash {
+                        self.notify(
+                            "The agent's changes will be staged in your repository — review them in File Status and commit".into(),
+                            true,
+                        );
+                    }
+                }
+                agents::TaskAction::Discard {
+                    task,
+                    repo,
+                    worktree,
+                    branch,
+                } => {
+                    self.dialog = Some(Dialog::DiscardAgent {
+                        task,
+                        repo,
+                        worktree,
+                        branch,
+                    })
                 }
             }
         }
@@ -1886,6 +2010,7 @@ impl FoxGitApp {
         let mut run: Option<Op> = None;
         let mut clone: Option<(String, PathBuf, String)> = None;
         let mut publish = false;
+        let mut discard_agent: Option<(u64, PathBuf, PathBuf, String)> = None;
         let signed_in = self.github.login().is_some();
         let owners = if matches!(&dialog, Dialog::AddRemote { github: true, .. }) {
             self.github.owners()
@@ -1913,6 +2038,7 @@ impl FoxGitApp {
             Dialog::Clone { .. } => "Clone repository",
             Dialog::Confirm { title, .. } => title.as_str(),
             Dialog::AddRemote { .. } => "Add remote",
+            Dialog::DiscardAgent { .. } => "Discard agent work",
             Dialog::EditRemote { .. } => "Edit remote",
         }
         .to_string();
@@ -2136,6 +2262,12 @@ impl FoxGitApp {
                                 && !form.owner.is_empty();
                         }
                     }
+                    Dialog::DiscardAgent { branch, .. } => {
+                        ui.label(format!(
+                            "Delete the agent's copy of the repository and its branch {branch}?\nAnything not merged is lost. Your own folder is not touched."
+                        ));
+                        ok_label = "Discard";
+                    }
                     Dialog::EditRemote {
                         original,
                         name,
@@ -2153,7 +2285,10 @@ impl FoxGitApp {
                 }
 
                 ui.add_space(12.0);
-                let danger = matches!(&dialog, Dialog::Confirm { danger: true, .. });
+                let danger = matches!(
+                    &dialog,
+                    Dialog::Confirm { danger: true, .. } | Dialog::DiscardAgent { .. }
+                );
                 ui.horizontal(|ui| {
                     let p = theme::pal(ui);
                     let ok_btn =
@@ -2235,6 +2370,14 @@ impl FoxGitApp {
                                     url: Some(url.trim().to_string()),
                                 })
                             }
+                            Dialog::DiscardAgent {
+                                task,
+                                repo,
+                                worktree,
+                                branch,
+                            } => {
+                                discard_agent = Some((*task, repo.clone(), worktree.clone(), branch.clone()))
+                            }
                         }
                     }
                     if ui
@@ -2251,6 +2394,28 @@ impl FoxGitApp {
             if let Some(tab) = self.tabs.get(self.active) {
                 let (id, dir) = (tab.id, tab.path.clone());
                 self.enqueue(Some(id), dir, JobKind::Op(op));
+            }
+            keep = false;
+        }
+        if let Some((task, repo, worktree, branch)) = discard_agent {
+            // a tab showing the worktree would point at a deleted folder
+            if let Some(i) = self.tabs.iter().position(|t| t.path == worktree) {
+                self.close_tab(i);
+            }
+            if worktree.exists() {
+                let tab_id = self.tabs.iter().find(|t| t.path == repo).map(|t| t.id);
+                self.enqueue_then(
+                    tab_id,
+                    repo,
+                    Op::AgentCleanup {
+                        worktree: worktree.display().to_string(),
+                        branch,
+                        delete_branch: true,
+                    },
+                    AfterJob::AgentDiscarded(task),
+                );
+            } else {
+                self.agents.remove(task);
             }
             keep = false;
         }
@@ -2443,6 +2608,12 @@ impl eframe::App for FoxGitApp {
         }
         self.poll_checks();
         self.poll_publish();
+        for (text, ok) in self.agents.poll() {
+            self.notify(text, ok);
+        }
+        if self.agents.any_running() {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
         if self.auto_fetch_min > 0 {
             let every = Duration::from_secs(self.auto_fetch_min as u64 * 60);
             let since = self.last_auto_fetch.elapsed();
@@ -2497,11 +2668,23 @@ impl eframe::App for FoxGitApp {
             egui::CentralPanel::default().show(ui, |ui| self.launcher_ui(ui));
         } else {
             let active = self.active;
+            let agent_rows = self.agents.rows_for(&self.tabs[active].path);
             let tab = &mut self.tabs[active];
-            views::sidebar(ui, tab, &mut actions);
+            views::sidebar(ui, tab, &agent_rows, &mut actions);
             match tab.view {
                 View::History => views::history_view(ui, tab, &mut actions),
                 View::FileStatus => views::file_status_view(ui, tab, &mut actions),
+                View::Agent(id) => {
+                    let acts = self.agents.task_view(ui, id);
+                    self.apply_agent_actions(acts);
+                }
+            }
+        }
+        // a chat started from the New task dialog: show it in its repository's tab
+        if let Some((repo, id)) = self.agents.opened.take() {
+            if let Some(i) = self.tabs.iter().position(|t| t.path == repo) {
+                self.tabs[i].view = View::Agent(id);
+                self.select_tab(i);
             }
         }
 
@@ -2511,6 +2694,7 @@ impl eframe::App for FoxGitApp {
             self.log_window(&ctx);
         }
         self.about_window(&ctx);
+        self.agents.dialog_ui(&ctx);
         self.github.dialog_ui(&ctx);
         self.credential_dialog(&ctx);
         self.toast_ui(&ctx);
@@ -2532,6 +2716,8 @@ impl eframe::App for FoxGitApp {
             github_accounts: self.github.saved_logins(),
             clone_parent: Some(self.clone_parent.clone()),
             last_update_check: self.last_update_check,
+            agent_tasks: self.agents.saved(),
+            last_agent: Some(self.agents.last_kind),
         };
         eframe::set_value(storage, STORAGE_KEY, &saved);
     }
