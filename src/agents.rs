@@ -125,9 +125,92 @@ impl AgentKind {
         }
     }
 
+    /// Shell line that starts the agent's interactive interface (resuming the chat's session).
+    fn interactive_line(self, exe: &Path, resume: Option<&str>) -> String {
+        let q = shell_quote(&exe.to_string_lossy());
+        match (self, resume) {
+            (AgentKind::Claude, Some(s)) => format!("{q} --resume {}", shell_quote(s)),
+            (AgentKind::Hermes, Some(s)) => format!("{q} chat --resume {}", shell_quote(s)),
+            _ => q,
+        }
+    }
+
     /// Whether a later message can continue the agent's own session.
     fn can_resume(self) -> bool {
         !matches!(self, AgentKind::Codex)
+    }
+}
+
+/// Quote for POSIX shells (and good enough for PowerShell when there are no quotes inside).
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@".contains(c))
+    {
+        s.to_string()
+    } else if cfg!(windows) {
+        format!("\"{s}\"")
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// The first code editor with a command-line launcher on the PATH.
+fn find_editor() -> Option<(&'static str, PathBuf)> {
+    [
+        ("Cursor", "cursor"),
+        ("VS Code", "code"),
+        ("Zed", "zed"),
+        ("Sublime Text", "subl"),
+    ]
+    .into_iter()
+    .find_map(|(name, prog)| which(prog).map(|p| (name, p)))
+}
+
+fn spawn_detached(exe: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<()> {
+    let mut c = Command::new(exe);
+    c.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(p) = shellenv::path() {
+        c.env("PATH", p);
+    }
+    c.spawn().map(|_| ())
+}
+
+/// Open the system's terminal app in `dir`.
+fn open_terminal_app(dir: &Path) -> Result<(), String> {
+    let d = dir.as_os_str();
+    let try_run = |prog: &str, args: &[&std::ffi::OsStr]| -> bool {
+        Command::new(prog)
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+    let ok = if cfg!(target_os = "macos") {
+        try_run("open", &["-a".as_ref(), "Terminal".as_ref(), d])
+    } else if cfg!(windows) {
+        try_run("wt", &["-d".as_ref(), d])
+            || try_run("cmd", &["/c".as_ref(), "start".as_ref(), "cmd".as_ref()])
+    } else {
+        let wd = format!("--working-directory={}", dir.display());
+        try_run("x-terminal-emulator", &[])
+            || try_run("gnome-terminal", &[wd.as_ref()])
+            || try_run("konsole", &["--workdir".as_ref(), d])
+            || try_run("xfce4-terminal", &[wd.as_ref()])
+            || try_run("kitty", &["--directory".as_ref(), d])
+            || try_run("alacritty", &["--working-directory".as_ref(), d])
+            || try_run("xterm", &[])
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err("Could not find a terminal app to open".into())
     }
 }
 
@@ -475,6 +558,17 @@ pub struct Task {
     input: String,
     started: Option<Instant>,
     runner: Option<Runner>,
+    /// Chat or Terminal.
+    pub pane: Pane,
+    terminal: Option<crate::terminal::Terminal>,
+    term_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Pane {
+    #[default]
+    Chat,
+    Terminal,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -522,6 +616,17 @@ pub enum TaskAction {
         worktree: PathBuf,
         branch: String,
     },
+    /// Push the agent's branch (committing its work first) and open GitHub's "new pull request".
+    PushPr {
+        repo: PathBuf,
+        worktree: PathBuf,
+        branch: String,
+        remote: String,
+        message: String,
+        commit_first: bool,
+        compare_url: Option<String>,
+    },
+    Notify(String, bool),
 }
 
 struct NewTask {
@@ -587,6 +692,9 @@ impl Agents {
                     input: String::new(),
                     started: None,
                     runner: None,
+                    pane: Pane::Chat,
+                    terminal: None,
+                    term_error: None,
                 };
                 task.refresh_changes();
                 task
@@ -910,6 +1018,9 @@ impl Agents {
             input: String::new(),
             started: None,
             runner: None,
+            pane: Pane::Chat,
+            terminal: None,
+            term_error: None,
         };
         task.send(f.prompt.trim().to_string(), exe, &self.ctx);
         self.tasks.push(task);
@@ -1061,6 +1172,58 @@ impl Agents {
                     }
                     ui.label(RichText::new(info).small().color(p.faint));
                 });
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let mut idx = usize::from(t.pane == Pane::Terminal);
+                    if theme::segmented(ui, &["Chat", "Terminal"], &mut idx) {
+                        t.pane = if idx == 1 { Pane::Terminal } else { Pane::Chat };
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ready = t.worktree_ready;
+                        let more = ui.add_enabled(ready, egui::Button::new("⋯")).on_hover_text("Open the agent's copy elsewhere");
+                        egui::Popup::menu(&more).show(|ui| {
+                            if ui.button("Open in Terminal app").clicked() {
+                                if let Err(e) = open_terminal_app(&t.worktree) {
+                                    out.push(TaskAction::Notify(e, false));
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Show in file manager").clicked() {
+                                crate::tabs::reveal_in_file_manager(&t.worktree);
+                                ui.close();
+                            }
+                            if ui.button("Copy folder path").clicked() {
+                                ui.ctx().copy_text(t.worktree.display().to_string());
+                                ui.close();
+                            }
+                        });
+                        let editor = find_editor();
+                        let label = match &editor {
+                            Some((name, _)) => format!("Open in {name}"),
+                            None => "Open in editor".to_string(),
+                        };
+                        if ui
+                            .add_enabled(ready, egui::Button::new(label))
+                            .on_hover_text("Open the agent's copy of the repository in your code editor")
+                            .clicked()
+                        {
+                            match editor {
+                                Some((name, exe)) => {
+                                    if let Err(e) = spawn_detached(&exe, &[t.worktree.as_os_str()]) {
+                                        out.push(TaskAction::Notify(format!("Could not start {name}: {e}"), false));
+                                    }
+                                }
+                                None => {
+                                    out.push(TaskAction::Notify(
+                                        "No editor found (Cursor, VS Code, Zed or Sublime Text with its command-line tool) — opening the folder instead".into(),
+                                        false,
+                                    ));
+                                    crate::tabs::reveal_in_file_manager(&t.worktree);
+                                }
+                            }
+                        }
+                    });
+                });
             });
 
         // ---- actions + message box
@@ -1103,6 +1266,19 @@ impl Agents {
                                 }
                             });
                         });
+                        let push = t.push_action();
+                        ui.add_enabled_ui(!running && has_work && push.is_some(), |ui| {
+                            let r = ui.button("Push & PR").on_hover_text(if push.is_some() {
+                                "Commit the agent's work, push its branch and open GitHub's new pull request page"
+                            } else {
+                                "Add a remote to this repository first"
+                            });
+                            if r.clicked() {
+                                if let Some(a) = push {
+                                    out.push(a);
+                                }
+                            }
+                        });
                         ui.add_enabled_ui(t.worktree_ready, |ui| {
                             if ui.button("Review changes").on_hover_text("Open the agent's copy as a tab — stage, discard or edit like any repository").clicked() {
                                 out.push(TaskAction::Review(t.worktree.clone()));
@@ -1110,6 +1286,9 @@ impl Agents {
                         });
                     });
                 });
+                if t.pane == Pane::Terminal {
+                    return;
+                }
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     let w = ui.available_width() - 90.0;
@@ -1146,6 +1325,14 @@ impl Agents {
                         .color(p.faint),
                 );
             });
+
+        // ---- the terminal
+        if t.pane == Pane::Terminal {
+            egui::CentralPanel::default()
+                .frame(theme::panel(p.base, 14, 8))
+                .show(ui, |ui| t.terminal_ui(ui, running, &ctx));
+            return out;
+        }
 
         // ---- the conversation
         egui::CentralPanel::default()
@@ -1312,6 +1499,107 @@ impl Task {
             }
             self.status = Status::Stopped;
             self.push(Role::Info, "Stopped.".into());
+        }
+    }
+
+    /// Push & PR, if the main repository has a remote.
+    fn push_action(&self) -> Option<TaskAction> {
+        let repo = git2::Repository::open(&self.repo).ok()?;
+        let names = repo.remotes().ok()?;
+        let mut names: Vec<String> = names.iter().flatten().flatten().map(String::from).collect();
+        names.sort_by_key(|n| n != "origin");
+        let remote = names.into_iter().next()?;
+        let url = repo
+            .find_remote(&remote)
+            .ok()?
+            .url()
+            .ok()
+            .map(String::from)
+            .unwrap_or_default();
+        let compare_url = crate::github::repo_slug(&url).map(|slug| {
+            format!(
+                "https://github.com/{slug}/compare/{}...{}?expand=1",
+                self.base, self.branch
+            )
+        });
+        Some(TaskAction::PushPr {
+            repo: self.repo.clone(),
+            worktree: self.worktree.clone(),
+            branch: self.branch.clone(),
+            remote,
+            message: format!(
+                "{}\n\nDone with {} in FoxGit.\n",
+                self.title,
+                self.kind.name()
+            ),
+            commit_first: self.uncommitted() > 0,
+            compare_url,
+        })
+    }
+
+    /// The Terminal pane: a shell in the agent's copy, plus "run the agent here".
+    fn terminal_ui(&mut self, ui: &mut egui::Ui, running: bool, ctx: &egui::Context) {
+        let p = pal(ui);
+        if !self.worktree_ready {
+            ui.centered_and_justified(|ui| {
+                ui.label(
+                    RichText::new(
+                        "The agent's copy of the repository is created with the first message.",
+                    )
+                    .weak(),
+                );
+            });
+            return;
+        }
+        if self.terminal.is_none() && self.term_error.is_none() {
+            match crate::terminal::Terminal::spawn(&self.worktree, ctx) {
+                Ok(t) => self.terminal = Some(t),
+                Err(e) => self.term_error = Some(e),
+            }
+        }
+        ui.horizontal(|ui| {
+            let exe = self.kind.find();
+            let resume = self.kind.can_resume().then(|| self.session.clone()).flatten();
+            let label = match &resume {
+                Some(_) => format!("▶  Continue in {}", self.kind.name()),
+                None => format!("▶  Start {}", self.kind.name()),
+            };
+            let can = exe.is_some() && !running && self.terminal.as_ref().is_some_and(|t| !t.exited());
+            if ui
+                .add_enabled(can, egui::Button::new(label))
+                .on_hover_text(if running {
+                    "Wait until the chat run finishes (or stop it) — both would work on the same session"
+                } else {
+                    "Run the agent's own full-screen interface here, in its copy of the repository"
+                })
+                .clicked()
+            {
+                if let (Some(exe), Some(term)) = (exe, self.terminal.as_mut()) {
+                    term.run_line(&self.kind.interactive_line(&exe, resume.as_deref()));
+                }
+            }
+            if ui.button("⟳  New shell").on_hover_text("Close this shell and start a new one").clicked() {
+                self.terminal = None;
+                self.term_error = None;
+            }
+            if ui.button("Copy screen").clicked() {
+                if let Some(t) = &self.terminal {
+                    ui.ctx().copy_text(t.contents());
+                }
+            }
+            ui.label(
+                RichText::new(format!("in {}", self.worktree.display()))
+                    .small()
+                    .color(p.faint),
+            );
+        });
+        ui.add_space(6.0);
+        match (&mut self.terminal, &self.term_error) {
+            (Some(t), _) => t.ui(ui),
+            (None, Some(e)) => {
+                ui.label(RichText::new(format!("Could not open a terminal: {e}")).color(p.red));
+            }
+            _ => {}
         }
     }
 
@@ -1854,6 +2142,9 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"done","tot
             input: String::new(),
             started: None,
             runner: None,
+            pane: Pane::Chat,
+            terminal: None,
+            term_error: None,
         };
         t.apply(Ev::SayDelta("Hel".into()));
         t.apply(Ev::SayDelta("lo".into()));

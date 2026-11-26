@@ -15,6 +15,10 @@ into the GitHub Release notes.
   messages typed while it's busy wait in a queue; Claude Code and Hermes resume the same session.
 - **Review changes** opens the agent's copy as a tab (stage / discard hunks and lines as usual),
   then **Merge into <branch>** (or squash into staged changes) or **Discard**.
+- Developer tools per chat (Orca-style): a built-in **Terminal** tab (a real PTY shell in the
+  agent's copy, with "Continue in Claude Code / Hermes" to open the agent's own full-screen
+  interface on the same session), **Open in Cursor / VS Code / Zed**, **Open in Terminal app**,
+  and **Push & PR** (commit, push the branch, open GitHub's new pull request page).
 
 ## [0.1.0] - 2026-11-26
 

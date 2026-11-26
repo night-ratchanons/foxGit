@@ -908,6 +908,14 @@ pub enum Op {
         commit_first: bool,
         squash: bool,
     },
+    /// Commit what's uncommitted in an agent's worktree, then push its branch with upstream.
+    AgentPush {
+        worktree: String,
+        branch: String,
+        remote: String,
+        message: String,
+        commit_first: bool,
+    },
     /// Delete an agent's worktree (and its branch).
     AgentCleanup {
         worktree: String,
@@ -962,6 +970,7 @@ impl Op {
                 format!("{} {branch}", if *squash { "Squash" } else { "Merge" })
             }
             Op::AgentCleanup { branch, .. } => format!("Discard {branch}"),
+            Op::AgentPush { branch, .. } => format!("Push {branch}"),
             Op::ApplyPatch { label, .. } => label.clone(),
         }
     }
@@ -1140,6 +1149,24 @@ impl Op {
                         None,
                     ));
                 }
+                v
+            }
+            Op::AgentPush {
+                worktree,
+                branch,
+                remote,
+                message,
+                commit_first,
+            } => {
+                let mut v = Vec::new();
+                if *commit_first {
+                    v.push((s(&["-C", worktree, "add", "-A"]), None));
+                    v.push((
+                        s(&["-C", worktree, "commit", "-F", "-"]),
+                        Some(message.clone().into_bytes()),
+                    ));
+                }
+                v.push((s(&["push", "-u", remote, branch]), None));
                 v
             }
             Op::AgentCleanup {
@@ -1574,6 +1601,41 @@ mod tests {
         assert!(git_out(d, &["branch", "--list", "agent/task"])
             .trim()
             .is_empty());
+    }
+
+    #[test]
+    fn agent_push_commits_then_pushes_the_branch() {
+        let t = setup();
+        let d = t.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            d,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &bare.path().display().to_string(),
+            ],
+        );
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = wt_dir.path().join("task");
+        let wts = wt.display().to_string();
+        git(d, &["worktree", "add", "-b", "agent/push", &wts, "main"]);
+        fs::write(wt.join("x.txt"), "x\n").unwrap();
+        let out = Op::AgentPush {
+            worktree: wts,
+            branch: "agent/push".into(),
+            remote: "origin".into(),
+            message: "Agent work\n".into(),
+            commit_first: true,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        let remote = git_out(bare.path(), &["log", "-1", "--format=%s", "agent/push"]);
+        assert_eq!(remote.trim(), "Agent work");
+        let up = git_out(d, &["rev-parse", "--abbrev-ref", "agent/push@{upstream}"]);
+        assert_eq!(up.trim(), "origin/agent/push");
     }
 
     #[test]

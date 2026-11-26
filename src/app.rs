@@ -286,10 +286,11 @@ struct Job {
 }
 
 /// Bookkeeping to do when a job succeeds.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum AfterJob {
     AgentMerged(u64),
     AgentDiscarded(u64),
+    OpenUrl(String),
 }
 
 struct JobDone {
@@ -901,6 +902,9 @@ impl FoxGitApp {
             }
             match done.after {
                 Some(AfterJob::AgentMerged(id)) if done.ok => self.agents.mark_merged(id),
+                Some(AfterJob::OpenUrl(url)) if done.ok => {
+                    ctx.open_url(egui::OpenUrl::new_tab(url));
+                }
                 Some(AfterJob::AgentDiscarded(id)) if done.ok => {
                     self.agents.remove(id);
                     for t in &mut self.tabs {
@@ -1043,6 +1047,29 @@ impl FoxGitApp {
                             "The agent's changes will be staged in your repository — review them in File Status and commit".into(),
                             true,
                         );
+                    }
+                }
+                agents::TaskAction::Notify(text, ok) => self.notify(text, ok),
+                agents::TaskAction::PushPr {
+                    repo,
+                    worktree,
+                    branch,
+                    remote,
+                    message,
+                    commit_first,
+                    compare_url,
+                } => {
+                    let tab_id = self.tabs.iter().find(|t| t.path == repo).map(|t| t.id);
+                    let op = Op::AgentPush {
+                        worktree: worktree.display().to_string(),
+                        branch: branch.clone(),
+                        remote,
+                        message,
+                        commit_first,
+                    };
+                    match compare_url {
+                        Some(url) => self.enqueue_then(tab_id, repo, op, AfterJob::OpenUrl(url)),
+                        None => self.enqueue(tab_id, repo, JobKind::Op(op)),
                     }
                 }
                 agents::TaskAction::Discard {

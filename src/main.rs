@@ -11,6 +11,7 @@ mod github;
 mod graph;
 mod shellenv;
 mod tabs;
+mod terminal;
 mod theme;
 mod update;
 mod views;
