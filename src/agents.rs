@@ -64,7 +64,7 @@ impl AgentKind {
 
     /// Full path of the CLI if it is installed (looked up on the login-shell PATH).
     pub fn find(self) -> Option<PathBuf> {
-        which(self.program())
+        crate::desktop::which(self.program())
     }
 
     /// The headless command for one turn, and what to write to its stdin.
@@ -153,83 +153,6 @@ fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
-}
-
-/// The first code editor with a command-line launcher on the PATH.
-fn find_editor() -> Option<(&'static str, PathBuf)> {
-    [
-        ("Cursor", "cursor"),
-        ("VS Code", "code"),
-        ("Zed", "zed"),
-        ("Sublime Text", "subl"),
-    ]
-    .into_iter()
-    .find_map(|(name, prog)| which(prog).map(|p| (name, p)))
-}
-
-fn spawn_detached(exe: &Path, args: &[&std::ffi::OsStr]) -> std::io::Result<()> {
-    let mut c = Command::new(exe);
-    c.args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if let Some(p) = shellenv::path() {
-        c.env("PATH", p);
-    }
-    c.spawn().map(|_| ())
-}
-
-/// Open the system's terminal app in `dir`.
-fn open_terminal_app(dir: &Path) -> Result<(), String> {
-    let d = dir.as_os_str();
-    let try_run = |prog: &str, args: &[&std::ffi::OsStr]| -> bool {
-        Command::new(prog)
-            .args(args)
-            .current_dir(dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok()
-    };
-    let ok = if cfg!(target_os = "macos") {
-        try_run("open", &["-a".as_ref(), "Terminal".as_ref(), d])
-    } else if cfg!(windows) {
-        try_run("wt", &["-d".as_ref(), d])
-            || try_run("cmd", &["/c".as_ref(), "start".as_ref(), "cmd".as_ref()])
-    } else {
-        let wd = format!("--working-directory={}", dir.display());
-        try_run("x-terminal-emulator", &[])
-            || try_run("gnome-terminal", &[wd.as_ref()])
-            || try_run("konsole", &["--workdir".as_ref(), d])
-            || try_run("xfce4-terminal", &[wd.as_ref()])
-            || try_run("kitty", &["--directory".as_ref(), d])
-            || try_run("alacritty", &["--working-directory".as_ref(), d])
-            || try_run("xterm", &[])
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err("Could not find a terminal app to open".into())
-    }
-}
-
-fn which(program: &str) -> Option<PathBuf> {
-    let path = shellenv::path()
-        .map(String::from)
-        .or_else(|| std::env::var("PATH").ok())?;
-    let (sep, exts): (char, &[&str]) = if cfg!(windows) {
-        (';', &[".exe", ".cmd", ".bat", ""])
-    } else {
-        (':', &[""])
-    };
-    path.split(sep)
-        .filter(|d| !d.is_empty())
-        .flat_map(|d| {
-            exts.iter()
-                .map(move |e| Path::new(d).join(format!("{program}{e}")))
-        })
-        .find(|p| p.is_file())
 }
 
 // ---------------------------------------------------------------------------
@@ -625,6 +548,9 @@ pub enum TaskAction {
         message: String,
         commit_first: bool,
         compare_url: Option<String>,
+        /// Branch the chat started from (the pull request's base).
+        base: String,
+        title: String,
     },
     Notify(String, bool),
 }
@@ -754,6 +680,26 @@ impl Agents {
             .collect()
     }
 
+    /// Every chat of every repository: (repository, row), newest first.
+    pub fn all_rows(&self) -> Vec<(PathBuf, RowInfo)> {
+        self.tasks
+            .iter()
+            .rev()
+            .map(|t| {
+                (
+                    t.repo.clone(),
+                    RowInfo {
+                        id: t.id,
+                        title: t.title.clone(),
+                        status: t.status,
+                        kind: t.kind,
+                        queued: t.queue.len(),
+                    },
+                )
+            })
+            .collect()
+    }
+
     pub fn has(&self, id: u64) -> bool {
         self.tasks.iter().any(|t| t.id == id)
     }
@@ -854,7 +800,8 @@ impl Agents {
 
     // ------------------------------------------------------------------ new task dialog
 
-    pub fn open_new(&mut self, repo: &Path, repo_name: &str, base: &str) {
+    /// Open the "New agent chat" dialog (`prompt` prefills the first message).
+    pub fn open_new(&mut self, repo: &Path, repo_name: &str, base: &str, prompt: &str) {
         let installed: Vec<_> = AgentKind::ALL.iter().map(|k| (*k, k.find())).collect();
         let kind = if installed
             .iter()
@@ -872,7 +819,7 @@ impl Agents {
             repo: repo.to_path_buf(),
             repo_name: repo_name.to_string(),
             base: base.to_string(),
-            prompt: String::new(),
+            prompt: prompt.to_string(),
             kind,
             run_commands: true,
             installed,
@@ -1183,7 +1130,7 @@ impl Agents {
                         let more = ui.add_enabled(ready, egui::Button::new("⋯")).on_hover_text("Open the agent's copy elsewhere");
                         egui::Popup::menu(&more).show(|ui| {
                             if ui.button("Open in Terminal app").clicked() {
-                                if let Err(e) = open_terminal_app(&t.worktree) {
+                                if let Err(e) = crate::desktop::open_terminal_app(&t.worktree) {
                                     out.push(TaskAction::Notify(e, false));
                                 }
                                 ui.close();
@@ -1197,7 +1144,7 @@ impl Agents {
                                 ui.close();
                             }
                         });
-                        let editor = find_editor();
+                        let editor = crate::desktop::editor();
                         let label = match &editor {
                             Some((name, _)) => format!("Open in {name}"),
                             None => "Open in editor".to_string(),
@@ -1209,7 +1156,7 @@ impl Agents {
                         {
                             match editor {
                                 Some((name, exe)) => {
-                                    if let Err(e) = spawn_detached(&exe, &[t.worktree.as_os_str()]) {
+                                    if let Err(e) = crate::desktop::spawn_detached(&exe, &[t.worktree.as_os_str()]) {
                                         out.push(TaskAction::Notify(format!("Could not start {name}: {e}"), false));
                                     }
                                 }
@@ -1534,6 +1481,8 @@ impl Task {
             ),
             commit_first: self.uncommitted() > 0,
             compare_url,
+            base: self.base.clone(),
+            title: self.title.clone(),
         })
     }
 

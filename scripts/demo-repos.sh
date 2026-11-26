@@ -65,4 +65,19 @@ printf '# Mobile app\n\nRun `npm start`.\n' > README.md
 git init -q -b main "$ROOT/landing-page" && cd "$ROOT/landing-page"
 w index.html "<h1>Hello</h1>"; c "Mint" "Landing page"
 w style.css "body { margin: 0 }"; c "Mint" "Styles"
+# web-app — package.json scripts (Run panel) and a merge stopped on a conflict
+git init -q -b main "$ROOT/web-app" && cd "$ROOT/web-app"
+printf '{\n  "name": "web-app",\n  "scripts": {\n    "dev": "node server.js",\n    "build": "echo building",\n    "test": "echo ok",\n    "lint": "echo lint"\n  }\n}\n' > package.json
+touch pnpm-lock.yaml && mkdir -p node_modules && echo node_modules > .gitignore
+printf "require('http').createServer((q, r) => r.end('hi')).listen(5173, () => console.log('  Local:   http://localhost:5173/'))\n" > server.js
+printf 'export const price = (p) => {\n  return p.toFixed(2)\n}\n\nexport const total = (items) => items.length\n' > src.js
+git add -A && c "Mali" "Web app with a dev server"
+git checkout -qb feature/currency
+printf 'export const price = (p, cur = "THB") => {\n  return `${p.toFixed(2)} ${cur}`\n}\n\nexport const total = (items) => items.length\n' > src.js
+git commit -qam "Show the currency" --author "Nok <nok@example.com>"
+git checkout -q main
+printf 'export const price = (p) => {\n  return "฿" + p.toLocaleString()\n}\n\nexport const total = (items) => items.length\n' > src.js
+git commit -qam "Format prices with separators" --author "Mali <mali@example.com>"
+git merge -q feature/currency >/dev/null 2>&1 || true
+
 echo "Demo repositories created in $ROOT"

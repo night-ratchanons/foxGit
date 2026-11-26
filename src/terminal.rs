@@ -13,7 +13,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 const SCROLLBACK: usize = 5000;
-const FONT_SIZE: f32 = 13.0;
+/// Font size in points, as f32 bits (Settings can change it).
+static FONT_SIZE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x4150_0000); // 13.0
+
+pub fn font_size() -> f32 {
+    f32::from_bits(FONT_SIZE.load(Ordering::Relaxed))
+}
+
+pub fn set_font_size(size: f32) {
+    FONT_SIZE.store(size.clamp(9.0, 24.0).to_bits(), Ordering::Relaxed);
+}
 
 pub struct Terminal {
     parser: Arc<Mutex<vt100::Parser>>,
@@ -131,7 +140,7 @@ impl Terminal {
     /// Draw the terminal into the remaining space and feed it the keyboard while focused.
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let p = pal(ui);
-        let font = FontId::monospace(FONT_SIZE);
+        let font = FontId::monospace(font_size());
         let m = ui
             .painter()
             .layout_no_wrap("M".into(), font.clone(), Color32::WHITE);

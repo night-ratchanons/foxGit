@@ -179,6 +179,19 @@ pub struct FileDiff {
 }
 
 impl FileDiff {
+    /// Line number (new side) of the first change, for "open in editor".
+    pub fn first_new_line(&self) -> Option<usize> {
+        let first = self
+            .lines
+            .iter()
+            .position(|l| l.kind == LineKind::Added || l.kind == LineKind::Removed)?;
+        self.lines[first..]
+            .iter()
+            .chain(self.lines[..first].iter().rev())
+            .find_map(|l| l.new_no)
+            .map(|n| n as usize)
+    }
+
     pub fn hunk_of(&self, line: usize) -> Option<usize> {
         self.hunks
             .iter()
@@ -886,7 +899,6 @@ pub enum Op {
     },
     Revert(String),
     CherryPick(String),
-    AbortMerge,
     RemoteAdd {
         name: String,
         url: String,
@@ -922,6 +934,31 @@ pub enum Op {
         branch: String,
         delete_branch: bool,
     },
+    /// Fetch pull request `number` from GitHub into the local branch `pr/<number>` and switch to it.
+    CheckoutPr {
+        remote: String,
+        number: u64,
+        /// The local `pr/<number>` branch already exists (then it is fast-forwarded).
+        exists: bool,
+    },
+    /// Resolve conflicted files with one side as a whole (`ours` or `theirs`) and mark them resolved.
+    ResolveWith {
+        paths: Vec<String>,
+        theirs: bool,
+    },
+    /// Mark conflicted files as resolved (`git add`).
+    MarkResolved(Vec<String>),
+    /// Resolve one file in the external merge tool git is set up with.
+    MergeTool(String),
+    /// Continue the merge / rebase / cherry-pick / revert in progress.
+    Continue(Sequence),
+    /// Abort the merge / rebase / cherry-pick / revert in progress.
+    Abort(Sequence),
+    /// Repository-local `user.name` / `user.email` (empty = leave unchanged).
+    SetIdentity {
+        name: String,
+        email: String,
+    },
     /// Stage / unstage / discard part of a file (hunks or individual lines).
     ApplyPatch {
         patch: Vec<u8>,
@@ -930,6 +967,47 @@ pub enum Op {
         zero_context: bool,
         label: String,
     },
+}
+
+/// An operation that stops on conflicts and can be continued or aborted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sequence {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+}
+
+impl Sequence {
+    /// The one in progress in `repo`, if any.
+    pub fn of(state: git2::RepositoryState) -> Option<Sequence> {
+        use git2::RepositoryState as S;
+        match state {
+            S::Merge => Some(Sequence::Merge),
+            S::Rebase | S::RebaseInteractive | S::RebaseMerge => Some(Sequence::Rebase),
+            S::CherryPick | S::CherryPickSequence => Some(Sequence::CherryPick),
+            S::Revert | S::RevertSequence => Some(Sequence::Revert),
+            _ => None,
+        }
+    }
+
+    pub fn command(self) -> &'static str {
+        match self {
+            Sequence::Merge => "merge",
+            Sequence::Rebase => "rebase",
+            Sequence::CherryPick => "cherry-pick",
+            Sequence::Revert => "revert",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            Sequence::Merge => "merge",
+            Sequence::Rebase => "rebase",
+            Sequence::CherryPick => "cherry-pick",
+            Sequence::Revert => "revert",
+        }
+    }
 }
 
 impl Op {
@@ -962,7 +1040,6 @@ impl Op {
             Op::ResetTo { mode, .. } => format!("Reset ({mode})"),
             Op::Revert(c) => format!("Revert {}", &c[..7.min(c.len())]),
             Op::CherryPick(c) => format!("Cherry-pick {}", &c[..7.min(c.len())]),
-            Op::AbortMerge => "Abort merge".into(),
             Op::RemoteAdd { name, .. } => format!("Add remote {name}"),
             Op::RemoteEdit { name, .. } => format!("Edit remote {name}"),
             Op::RemoteRemove(name) => format!("Remove remote {name}"),
@@ -971,6 +1048,17 @@ impl Op {
             }
             Op::AgentCleanup { branch, .. } => format!("Discard {branch}"),
             Op::AgentPush { branch, .. } => format!("Push {branch}"),
+            Op::CheckoutPr { number, .. } => format!("Checkout pull request #{number}"),
+            Op::ResolveWith { paths, theirs } => format!(
+                "Resolve {} file(s) using {}",
+                paths.len(),
+                if *theirs { "theirs" } else { "ours" }
+            ),
+            Op::MarkResolved(p) => format!("Mark {} file(s) resolved", p.len()),
+            Op::MergeTool(p) => format!("Merge tool: {p}"),
+            Op::Continue(q) => format!("Continue {}", q.noun()),
+            Op::Abort(q) => format!("Abort {}", q.noun()),
+            Op::SetIdentity { .. } => "Set author identity".into(),
             Op::ApplyPatch { label, .. } => label.clone(),
         }
     }
@@ -1101,7 +1189,6 @@ impl Op {
             }
             Op::Revert(c) => vec![(s(&["revert", "--no-edit", c]), None)],
             Op::CherryPick(c) => vec![(s(&["cherry-pick", c]), None)],
-            Op::AbortMerge => vec![(s(&["merge", "--abort"]), None)],
             Op::RemoteAdd { name, url, fetch } => {
                 let mut v = vec![(s(&["remote", "add", name, url]), None)];
                 if *fetch {
@@ -1177,6 +1264,70 @@ impl Op {
                 let mut v = vec![(s(&["worktree", "remove", "--force", worktree]), None)];
                 if *delete_branch {
                     v.push((s(&["branch", "-D", branch]), None));
+                }
+                v
+            }
+            Op::CheckoutPr {
+                remote,
+                number,
+                exists,
+            } => {
+                let local = format!("pr/{number}");
+                let tracking = format!("{remote}/pr/{number}");
+                let mut v = vec![(
+                    s(&[
+                        "fetch",
+                        remote,
+                        &format!("+pull/{number}/head:refs/remotes/{tracking}"),
+                    ]),
+                    None,
+                )];
+                if *exists {
+                    v.push((s(&["checkout", &local]), None));
+                    v.push((s(&["merge", "--ff-only", &tracking]), None));
+                } else {
+                    v.push((
+                        s(&["checkout", "--no-track", "-b", &local, &tracking]),
+                        None,
+                    ));
+                }
+                v
+            }
+            Op::ResolveWith { paths, theirs } => vec![
+                (
+                    with_paths(
+                        &["checkout", if *theirs { "--theirs" } else { "--ours" }],
+                        paths,
+                    ),
+                    None,
+                ),
+                (with_paths(&["add"], paths), None),
+            ],
+            Op::MarkResolved(paths) => vec![(with_paths(&["add"], paths), None)],
+            Op::MergeTool(path) => vec![(
+                with_paths(
+                    &[
+                        "-c",
+                        "mergetool.keepBackup=false",
+                        "mergetool",
+                        "--no-prompt",
+                    ],
+                    std::slice::from_ref(path),
+                ),
+                None,
+            )],
+            Op::Continue(q) => vec![(
+                s(&["-c", "core.editor=true", q.command(), "--continue"]),
+                None,
+            )],
+            Op::Abort(q) => vec![(s(&[q.command(), "--abort"]), None)],
+            Op::SetIdentity { name, email } => {
+                let mut v = Vec::new();
+                if !name.trim().is_empty() {
+                    v.push((s(&["config", "user.name", name.trim()]), None));
+                }
+                if !email.trim().is_empty() {
+                    v.push((s(&["config", "user.email", email.trim()]), None));
                 }
                 v
             }
@@ -1636,6 +1787,117 @@ mod tests {
         assert_eq!(remote.trim(), "Agent work");
         let up = git_out(d, &["rev-parse", "--abbrev-ref", "agent/push@{upstream}"]);
         assert_eq!(up.trim(), "origin/agent/push");
+    }
+
+    #[test]
+    fn checkout_pr_fetches_pull_head_into_local_branch() {
+        // the "GitHub" side: a repo whose refs/pull/7/head points at a contributor's commit
+        let t = setup();
+        let d = t.path();
+        let server = setup();
+        let sd = server.path();
+        git(sd, &["checkout", "-q", "-b", "contrib"]);
+        fs::write(sd.join("pr.txt"), "from a fork\n").unwrap();
+        git(sd, &["add", "."]);
+        git(sd, &["commit", "-q", "-m", "pr work"]);
+        git(sd, &["update-ref", "refs/pull/7/head", "contrib"]);
+        git(sd, &["checkout", "-q", "main"]);
+        git(d, &["remote", "add", "origin", &sd.display().to_string()]);
+
+        let out = Op::CheckoutPr {
+            remote: "origin".into(),
+            number: 7,
+            exists: false,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(git_out(d, &["branch", "--show-current"]).trim(), "pr/7");
+        assert_eq!(git_out(d, &["log", "-1", "--format=%s"]).trim(), "pr work");
+        // no upstream: a plain Push must not create pr/7 on the remote by accident
+        assert!(git_out(d, &["config", "--get", "branch.pr/7.remote"])
+            .trim()
+            .is_empty());
+
+        // the author pushes more; checking out again fast-forwards the existing branch
+        git(sd, &["checkout", "-q", "contrib"]);
+        fs::write(sd.join("pr.txt"), "from a fork\nfixup\n").unwrap();
+        git(sd, &["commit", "-q", "-am", "pr fixup"]);
+        git(sd, &["update-ref", "refs/pull/7/head", "contrib"]);
+        git(d, &["checkout", "-q", "main"]);
+        let out = Op::CheckoutPr {
+            remote: "origin".into(),
+            number: 7,
+            exists: true,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(git_out(d, &["branch", "--show-current"]).trim(), "pr/7");
+        assert_eq!(git_out(d, &["log", "-1", "--format=%s"]).trim(), "pr fixup");
+    }
+
+    #[test]
+    fn resolve_conflicts_and_continue_merge() {
+        let t = setup();
+        let d = t.path();
+        git(d, &["checkout", "-q", "-b", "other"]);
+        fs::write(d.join("a.txt"), "theirs\n").unwrap();
+        git(d, &["commit", "-q", "-am", "theirs"]);
+        git(d, &["checkout", "-q", "main"]);
+        fs::write(d.join("a.txt"), "ours\n").unwrap();
+        git(d, &["commit", "-q", "-am", "ours"]);
+        let _ = Op::Merge("other".into()).run(d); // stops with a conflict
+        let repo = Repo::open(d).unwrap();
+        assert_eq!(Sequence::of(repo.repo.state()), Some(Sequence::Merge));
+        let status = repo.status().unwrap();
+        assert!(status
+            .unstaged
+            .iter()
+            .any(|f| f.kind == ChangeKind::Conflicted));
+
+        let out = Op::ResolveWith {
+            paths: vec!["a.txt".into()],
+            theirs: true,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(fs::read_to_string(d.join("a.txt")).unwrap(), "theirs\n");
+        let out = Op::Continue(Sequence::Merge).run(d);
+        assert!(out.ok, "{}", out.text);
+        let repo = Repo::open(d).unwrap();
+        assert_eq!(Sequence::of(repo.repo.state()), None);
+        assert_eq!(
+            git_out(d, &["log", "-1", "--format=%p"])
+                .split_whitespace()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn abort_rebase_and_set_identity() {
+        let t = setup();
+        let d = t.path();
+        git(d, &["checkout", "-q", "-b", "other", "HEAD~2"]);
+        fs::write(d.join("a.txt"), "clash\n").unwrap();
+        git(d, &["commit", "-q", "-am", "clash"]);
+        let _ = Op::Rebase("main".into()).run(d);
+        let repo = Repo::open(d).unwrap();
+        assert_eq!(Sequence::of(repo.repo.state()), Some(Sequence::Rebase));
+        let out = Op::Abort(Sequence::Rebase).run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(git_out(d, &["branch", "--show-current"]).trim(), "other");
+
+        let out = Op::SetIdentity {
+            name: " New Name ".into(),
+            email: String::new(),
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(git_out(d, &["config", "user.name"]).trim(), "New Name");
+        assert_eq!(
+            git_out(d, &["config", "user.email"]).trim(),
+            "t@example.com"
+        );
     }
 
     #[test]

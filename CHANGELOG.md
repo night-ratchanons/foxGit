@@ -20,6 +20,41 @@ into the GitHub Release notes.
   interface on the same session), **Open in Cursor / VS Code / Zed**, **Open in Terminal app**,
   and **Push & PR** (commit, push the branch, open GitHub's new pull request page).
 
+### New: everything in one window
+- **GitHub mode** (new rail button): the repository's **pull requests** and **issues**, open or
+  closed, with a filter. A pull request shows its conversation (description, comments, reviews),
+  **Files** (the patch of every file) and **Checks** (CI status). Merge (merge commit, squash or
+  rebase), **Approve**, **Request changes**, comment, close / reopen, **Checkout** (fetches the
+  PR into a local `pr/<number>` branch, also for PRs from forks) and Open on GitHub.
+- **New pull request** right from FoxGit: title, description, base branch (GitHub's default
+  branch is picked), draft; the branch is pushed first when needed. An agent's **Push & PR** now
+  fills in the same form instead of opening the browser. An issue has **Ask an agent**: it
+  starts an agent chat with the issue as the task.
+- **CI status** of the commit selected in History (✔ / × / running, with links to each check).
+- **Conflict resolution**: a conflicted file opens a view with one card per conflict — **Use
+  ours**, **Use theirs**, **Both** (either order) or neither — then **Save & mark resolved**;
+  or take a whole side, open the file in your editor, or run git's merge tool. The banner says
+  what is in progress (merge, rebase, cherry-pick, revert) with **Continue** and **Abort**.
+- **Run panel** (toolbar ▶ Run): the project's `package.json` scripts (with pnpm / yarn / bun /
+  npm from the lockfile), Cargo, Makefile targets and Go run in terminals docked at the bottom;
+  when a dev server prints its `localhost` URL an **Open in browser** button appears.
+- **Search mode** (⇧⌘F / Ctrl+Shift+F): find in files with `git grep` (match case, whole word,
+  regex, untracked files); a click opens your editor at that line.
+- **✨ Write message**: Claude Code writes the commit message from the staged diff, in the
+  style of the repository's recent commits.
+- **Command palette** (⌘K on macOS, Ctrl+Shift+P): every mode, git action, branch to check out,
+  script, project and setting, with fuzzy search.
+- **Settings** (⌘, / Ctrl+,): theme, terminal font size, code editor, default agent,
+  auto-fetch, and the author name / email of the current repository.
+- **Dashboard** (Projects → Dashboard): every open project — branch, ahead/behind, changes,
+  conflicts, running scripts and agent chats — with one click to the right place.
+- **Quick edit**: fix a working-copy file inside FoxGit (diff header → Edit, ⌘S saves), or ↗ to
+  open it in your editor at the first change.
+- **One window**: `foxgit <folder>` while FoxGit is running opens the folder as a tab in the
+  running window. Folders can also be dropped onto the window.
+- System notifications (and a Dock bounce) when an agent finishes or a push / pull / clone
+  completes while FoxGit is in the background.
+
 ## [0.1.0] - 2026-11-26
 
 First public release.

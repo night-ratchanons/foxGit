@@ -2,13 +2,22 @@
 
 mod account;
 mod agents;
+mod aicommit;
 mod app;
 mod askpass;
 mod branchtree;
+mod conflict;
+mod desktop;
 mod diffview;
+mod editor;
 mod git;
 mod github;
 mod graph;
+mod hub;
+mod instance;
+mod palette;
+mod runner;
+mod search;
 mod shellenv;
 mod tabs;
 mod terminal;
@@ -31,6 +40,16 @@ fn main() -> eframe::Result {
         .filter(|a| !a.starts_with("-psn_"))
         .collect();
     migrate_storage();
+    // Already running? Hand the folders to that window instead of opening a second one.
+    let lock = instance::lock_path();
+    if std::env::var_os("FOXGIT_NEW_INSTANCE").is_none() {
+        if let Some(l) = &lock {
+            if instance::forward(l, &initial_repos) {
+                return Ok(());
+            }
+        }
+    }
+    let incoming = lock.as_deref().and_then(instance::listen);
     install_crash_log();
     shellenv::init();
 
@@ -56,7 +75,10 @@ fn main() -> eframe::Result {
     eframe::run_native(
         APP_NAME,
         options,
-        Box::new(move |cc| Ok(Box::new(app::FoxGitApp::new(cc, initial_repos)))),
+        Box::new(move |cc| {
+            let _ = instance::CTX.set(cc.egui_ctx.clone());
+            Ok(Box::new(app::FoxGitApp::new(cc, initial_repos, incoming)))
+        }),
     )
 }
 

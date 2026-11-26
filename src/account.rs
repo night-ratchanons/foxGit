@@ -179,6 +179,18 @@ impl GitHub {
         self.active_account().map(|a| a.login.as_str())
     }
 
+    /// Token to use for a remote URL: the account named in the URL, else the active account.
+    pub fn token_for(&self, url: &str) -> Option<String> {
+        let by_user = github::url_user(url).and_then(|u| {
+            self.accounts
+                .iter()
+                .find(|a| a.login.eq_ignore_ascii_case(u))
+        });
+        by_user
+            .or_else(|| self.active_account())
+            .map(|a| a.token.clone())
+    }
+
     /// Every connected login, the active one first.
     pub fn logins(&self) -> Vec<String> {
         let active = self.login().map(String::from);

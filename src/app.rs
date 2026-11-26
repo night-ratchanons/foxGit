@@ -6,6 +6,7 @@ use crate::askpass::{self, AskRequest};
 use crate::git::{self, CommitInfo, DiffTarget, FileChange, FileDiff, Op, Refs, Repo, WorkStatus};
 use crate::github;
 use crate::graph::{self, GraphRow};
+use crate::hub;
 use crate::tabs::{self, LauncherEvent, LauncherMode, LauncherState, Project, TabEvent, TabInfo};
 use crate::theme;
 use crate::update::{self, Release};
@@ -17,6 +18,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+mod commands;
+mod dashboard;
+mod settings;
+
 pub const DEFAULT_COMMIT_LIMIT: usize = 3000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +30,10 @@ pub enum View {
     History,
     /// AI agent chats (the open chat is `RepoTab::agent_chat`).
     Agents,
+    /// Pull requests and issues of the GitHub remote.
+    GitHub,
+    /// Find in files.
+    Search,
 }
 
 type HistoryResult = Result<(Vec<CommitInfo>, Vec<GraphRow>), String>;
@@ -70,6 +79,18 @@ pub struct RepoTab {
     pub push_after_commit: bool,
 
     pub load_error: Option<String>,
+    /// CI checks of the selected commit, filled in by the app from GitHub (`None` = loading).
+    pub ci: Option<(git2::Oid, Option<Vec<crate::github::Check>>)>,
+    /// The conflicted file open in File Status, with the sides picked so far.
+    pub conflict: Option<crate::conflict::State>,
+    /// Terminals running the project's scripts (docked at the bottom).
+    pub run: crate::runner::RunPanel,
+    /// An AI commit message being written for the staged changes.
+    pub ai_msg: Option<Receiver<Result<String, String>>>,
+    /// Find in files (Search mode).
+    pub find: crate::search::Search,
+    /// Quick-edit window for a working-copy file.
+    pub edit: Option<crate::editor::EditState>,
 }
 
 impl RepoTab {
@@ -108,6 +129,12 @@ impl RepoTab {
             amend: false,
             push_after_commit: false,
             load_error: None,
+            ci: None,
+            conflict: None,
+            run: Default::default(),
+            ai_msg: None,
+            find: Default::default(),
+            edit: None,
         };
         tab.reload_fast();
         tab.start_history_load(None);
@@ -153,6 +180,25 @@ impl RepoTab {
             };
         }
         self.reload_diff();
+        // forget the open conflicted file once it's resolved (picks survive other refreshes)
+        if self
+            .conflict
+            .as_ref()
+            .is_some_and(|c| !self.conflicted().contains(&c.path))
+        {
+            self.conflict = None;
+        }
+    }
+
+    /// Conflicted paths in the working copy.
+    pub fn conflicted(&self) -> Vec<String> {
+        self.status
+            .unstaged
+            .iter()
+            .chain(&self.status.staged)
+            .filter(|f| f.kind == git::ChangeKind::Conflicted)
+            .map(|f| f.path.clone())
+            .collect()
     }
 
     /// Load history on a background thread (libgit2 topological walk can take a moment on big repos).
@@ -291,6 +337,8 @@ enum AfterJob {
     AgentMerged(u64),
     AgentDiscarded(u64),
     OpenUrl(String),
+    /// The branch is pushed: now create its pull request.
+    CreatePr(Box<hub::NewPr>),
 }
 
 struct JobDone {
@@ -397,13 +445,17 @@ pub enum Action {
     Run(Op),
     Dialog(Dialog),
     Refresh,
+    Notify(String, bool),
+    /// Have Claude Code write the commit message from the staged diff.
+    AiCommitMessage,
     LoadMore,
     /// Open the Add remote dialog for the active tab.
     AddRemote,
     /// Open the Edit remote dialog.
     EditRemote(String),
     /// Start a chat with an AI agent in the active repository.
-    NewAgentTask,
+    /// Open the New agent chat dialog, with an optional first message.
+    NewAgentTask(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +489,11 @@ struct Saved {
     agent_tasks: Vec<agents::SavedTask>,
     #[serde(default)]
     last_agent: Option<agents::AgentKind>,
+    /// Code editor picked in Settings (None = automatic).
+    #[serde(default)]
+    editor: Option<String>,
+    #[serde(default)]
+    terminal_font: Option<f32>,
 }
 
 /// Result of looking for `git` at startup.
@@ -509,10 +566,26 @@ pub struct FoxGitApp {
     publish: Option<PendingPublish>,
     next_tag: u64,
     agents: agents::Agents,
+    hub: hub::Hub,
+    palette: crate::palette::Palette,
+    settings: settings::SettingsState,
+    editor_pref: Option<String>,
+    term_font: f32,
+    /// Folders sent by a second `foxgit <path>` (single instance).
+    incoming: Option<Receiver<Vec<String>>>,
+    #[cfg(debug_assertions)]
+    demo_done: bool,
+    /// Dev only: pretend a GitHub account is connected (fake PR data, no network).
+    #[cfg(debug_assertions)]
+    demo_token: bool,
 }
 
 impl FoxGitApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Vec<String>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        initial: Vec<String>,
+        incoming: Option<Receiver<Vec<String>>>,
+    ) -> Self {
         let saved: Saved = cc
             .storage
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
@@ -592,7 +665,19 @@ impl FoxGitApp {
             publish: None,
             next_tag: 1,
             agents: agents::Agents::new(&cc.egui_ctx, saved.agent_tasks.clone(), saved.last_agent),
+            hub: hub::Hub::new(&cc.egui_ctx),
+            palette: Default::default(),
+            settings: Default::default(),
+            editor_pref: saved.editor.clone(),
+            term_font: saved.terminal_font.unwrap_or(13.0),
+            incoming,
+            #[cfg(debug_assertions)]
+            demo_done: false,
+            #[cfg(debug_assertions)]
+            demo_token: false,
         };
+        crate::desktop::set_preferred_editor(app.editor_pref.clone());
+        crate::terminal::set_font_size(app.term_font);
         app.apply_theme(&cc.egui_ctx);
         app.start_git_check(&cc.egui_ctx);
         if chrono::Utc::now().timestamp() - app.last_update_check > 24 * 3600 {
@@ -882,6 +967,22 @@ impl FoxGitApp {
             if !done.ok && looks_like_auth_failure(&done.text) {
                 self.cred_cache.clear();
             }
+            if done.title.starts_with("Clone")
+                || done.title.starts_with("Push")
+                || done.title == "Pull"
+            {
+                let first = done
+                    .text
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("");
+                os_notify(
+                    ctx,
+                    &format!("{} {}", done.title, if done.ok { "done" } else { "failed" }),
+                    if done.ok { "" } else { first },
+                );
+            }
             if done.ok {
                 self.notify(format!("{} ✔", done.title), true);
             } else {
@@ -905,6 +1006,7 @@ impl FoxGitApp {
                 Some(AfterJob::OpenUrl(url)) if done.ok => {
                     ctx.open_url(egui::OpenUrl::new_tab(url));
                 }
+                Some(AfterJob::CreatePr(pr)) if done.ok => self.hub.create_now(*pr),
                 Some(AfterJob::AgentDiscarded(id)) if done.ok => {
                     self.agents.remove(id);
                     for t in &mut self.tabs {
@@ -969,6 +1071,26 @@ impl FoxGitApp {
                     }
                 }
                 Action::Dialog(d) => self.dialog = Some(d),
+                Action::Notify(text, ok) => self.notify(text, ok),
+                Action::AiCommitMessage => {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        match agents::AgentKind::Claude.find() {
+                            Some(exe) => {
+                                let (tx, rx) = channel();
+                                let (dir, ctx) = (tab.path.clone(), ctx.clone());
+                                std::thread::spawn(move || {
+                                    let _ = tx.send(crate::aicommit::write_message(&exe, &dir));
+                                    ctx.request_repaint();
+                                });
+                                tab.ai_msg = Some(rx);
+                            }
+                            None => self.notify(
+                                "Install Claude Code (the `claude` command) to write commit messages with AI".into(),
+                                false,
+                            ),
+                        }
+                    }
+                }
                 Action::Refresh => {
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.reload_fast();
@@ -976,7 +1098,7 @@ impl FoxGitApp {
                     }
                 }
                 Action::AddRemote => self.open_add_remote(),
-                Action::NewAgentTask => {
+                Action::NewAgentTask(prompt) => {
                     if let Some(tab) = self.tabs.get(self.active) {
                         if tab.repo.is_head_unborn() {
                             self.notify(
@@ -992,7 +1114,7 @@ impl FoxGitApp {
                             } else {
                                 tab.refs.head_name.clone().unwrap_or_else(|| "HEAD".into())
                             };
-                            self.agents.open_new(&tab.path, &tab.name, &base);
+                            self.agents.open_new(&tab.path, &tab.name, &base, &prompt);
                         }
                     }
                 }
@@ -1058,7 +1180,31 @@ impl FoxGitApp {
                     message,
                     commit_first,
                     compare_url,
+                    base,
+                    title,
                 } => {
+                    // GitHub remote + account: fill in the pull request here instead of the browser
+                    if let Some(i) = self.tabs.iter().position(|t| t.path == repo) {
+                        let info = self.hub_info(i);
+                        if info.slug.is_some() && info.token.is_some() {
+                            let body = message.lines().skip(2).collect::<Vec<_>>().join("\n");
+                            let base = (!base.is_empty() && git2::Oid::from_str(&base).is_err())
+                                .then_some(base.as_str());
+                            let commit = commit_first.then(|| (worktree.clone(), message.clone()));
+                            match self.hub.open_create(
+                                &info,
+                                &branch,
+                                true,
+                                commit,
+                                &title,
+                                body.trim(),
+                                base,
+                            ) {
+                                Ok(()) => continue,
+                                Err(e) => self.notify(e, false),
+                            }
+                        }
+                    }
                     let tab_id = self.tabs.iter().find(|t| t.path == repo).map(|t| t.id);
                     let op = Op::AgentPush {
                         worktree: worktree.display().to_string(),
@@ -1085,6 +1231,106 @@ impl FoxGitApp {
                         branch,
                     })
                 }
+            }
+        }
+    }
+
+    /// What the GitHub view needs about tab `i`: its GitHub remote (the current branch's
+    /// upstream remote, else `origin`, else any GitHub remote), the token for it and the branch.
+    fn hub_info(&self, i: usize) -> hub::RepoInfo {
+        let tab = &self.tabs[i];
+        let refs = &tab.refs;
+        let head = refs.locals.iter().find(|b| b.is_head);
+        let is_gh = |r: &String| {
+            refs.remote_urls
+                .get(r)
+                .and_then(|u| crate::github::repo_slug(u))
+                .is_some()
+        };
+        let upstream_remote = head
+            .and_then(|b| b.upstream.as_deref())
+            .and_then(|u| {
+                refs.remote_names
+                    .iter()
+                    .find(|r| u.starts_with(&format!("{r}/")))
+                    .cloned()
+            })
+            .filter(is_gh);
+        let remote = upstream_remote
+            .or_else(|| {
+                refs.remote_names
+                    .iter()
+                    .find(|r| *r == "origin" && is_gh(r))
+                    .cloned()
+            })
+            .or_else(|| refs.remote_names.iter().find(|r| is_gh(r)).cloned());
+        let url = remote.as_ref().and_then(|r| refs.remote_urls.get(r));
+        #[allow(unused_mut)]
+        let mut token = url.and_then(|u| self.github.token_for(u));
+        #[cfg(debug_assertions)]
+        if self.demo_token {
+            token.get_or_insert_with(|| "demo".into());
+        }
+        hub::RepoInfo {
+            path: tab.path.clone(),
+            slug: url.and_then(|u| crate::github::repo_slug(u)),
+            token,
+            remote: remote.or_else(|| refs.remote_names.first().cloned()),
+            branch: if refs.head_detached || tab.repo.is_head_unborn() {
+                None
+            } else {
+                refs.head_name.clone()
+            },
+            has_upstream: head.is_some_and(|b| b.upstream.is_some()),
+            ahead: head.map_or(0, |b| b.ahead),
+            remote_branches: refs.remotes.iter().map(|r| r.name.clone()).collect(),
+        }
+    }
+
+    fn apply_hub_actions(&mut self, acts: Vec<hub::HubAction>, actions: &mut Vec<Action>) {
+        for a in acts {
+            match a {
+                hub::HubAction::CheckoutPr { number, remote } => {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        let exists = tab
+                            .refs
+                            .locals
+                            .iter()
+                            .any(|b| b.name == format!("pr/{number}"));
+                        actions.push(Action::Run(Op::CheckoutPr {
+                            remote,
+                            number,
+                            exists,
+                        }));
+                    }
+                }
+                hub::HubAction::StartAgent { prompt } => actions.push(Action::NewAgentTask(prompt)),
+                hub::HubAction::PushThenCreate {
+                    remote,
+                    branch,
+                    commit,
+                    pr,
+                } => {
+                    let tab_id = self.tabs.iter().find(|t| t.path == pr.repo).map(|t| t.id);
+                    let op = match commit {
+                        Some((worktree, message)) => Op::AgentPush {
+                            worktree: worktree.display().to_string(),
+                            branch,
+                            remote,
+                            message,
+                            commit_first: true,
+                        },
+                        None => Op::Push {
+                            set_upstream: Some((remote, branch)),
+                            force: false,
+                        },
+                    };
+                    let dir = pr.repo.clone();
+                    self.enqueue_then(tab_id, dir, op, AfterJob::CreatePr(pr));
+                }
+                hub::HubAction::Notify(text, ok) => self.notify(text, ok),
+                hub::HubAction::SignIn => self.github.open_signin(),
+                hub::HubAction::AddRemote => actions.push(Action::AddRemote),
             }
         }
     }
@@ -1244,6 +1490,30 @@ impl FoxGitApp {
                     ui.close();
                     self.open_launcher();
                 }
+                if ui.button("Dashboard").clicked() {
+                    ui.close();
+                    self.open_launcher();
+                    self.launcher.mode = LauncherMode::Overview;
+                }
+                if let Some(tab) = self.tabs.get(self.active).filter(|_| !self.show_launcher) {
+                    let dir = tab.path.clone();
+                    ui.separator();
+                    let editor = crate::desktop::editor()
+                        .map(|e| format!("Open in {}", e.0))
+                        .unwrap_or_else(|| "Open in editor".into());
+                    if ui.button(editor).clicked() {
+                        ui.close();
+                        if let Err(e) = crate::desktop::open_in_editor(&dir, None, None) {
+                            actions.push(Action::Notify(e, false));
+                        }
+                    }
+                    if ui.button("Open in Terminal app").clicked() {
+                        ui.close();
+                        if let Err(e) = crate::desktop::open_terminal_app(&dir) {
+                            actions.push(Action::Notify(e, false));
+                        }
+                    }
+                }
                 ui.separator();
                 if ui
                     .add_enabled(
@@ -1308,6 +1578,13 @@ impl FoxGitApp {
                     ui.close();
                     let ctx = ui.ctx().clone();
                     self.start_update_check(&ctx, true);
+                }
+                if ui
+                    .button(format!("Settings…   ({})", theme::shortcut(",")))
+                    .clicked()
+                {
+                    ui.close();
+                    self.settings.open = true;
                 }
                 if ui.button("About FoxGit").clicked() {
                     ui.close();
@@ -1375,6 +1652,24 @@ impl FoxGitApp {
                     }));
                 }
                 toolbar_divider(ui);
+                let running = self.tabs.get(self.active).map_or(0, |t| t.run.alive());
+                let run_btn = theme::ghost_button(ui, "▶", "Run", running, false).on_hover_text(
+                    "Run the project's scripts in a terminal (package.json, Cargo, Makefile, Go)",
+                );
+                let ctx = ui.ctx().clone();
+                egui::Popup::menu(&run_btn).show(|ui| {
+                    if let Some(tab) = self.tabs.get_mut(self.active) {
+                        let dir = tab.path.clone();
+                        if let Some((title, cmd)) = crate::runner::menu(ui, &mut tab.run, &dir) {
+                            if let Err(e) = tab.run.start(&dir, &ctx, &title, cmd.as_deref()) {
+                                actions.push(Action::Notify(
+                                    format!("Could not start a terminal: {e}"),
+                                    false,
+                                ));
+                            }
+                        }
+                    }
+                });
                 if theme::ghost_button(ui, "↻", "Refresh", 0, false)
                     .on_hover_text("Reload (F5)")
                     .clicked()
@@ -1418,6 +1713,26 @@ impl FoxGitApp {
                     None => {}
                 }
                 toolbar_divider(ui);
+                if theme::ghost_button(ui, "⚙", "Settings", 0, self.settings.open)
+                    .on_hover_text("Settings")
+                    .clicked()
+                {
+                    self.settings.open = !self.settings.open;
+                }
+                if theme::ghost_button(ui, "⌕", "Commands", 0, self.palette.is_open())
+                    .on_hover_text(format!(
+                        "Command palette ({})",
+                        theme::shortcut(if cfg!(target_os = "macos") {
+                            "K"
+                        } else {
+                            "Shift+P"
+                        })
+                    ))
+                    .clicked()
+                {
+                    let items = self.palette_items();
+                    self.palette.open(items);
+                }
                 if theme::ghost_button(ui, "📋", "Log", 0, self.show_log)
                     .on_hover_text("Show git command output")
                     .clicked()
@@ -1831,6 +2146,8 @@ impl FoxGitApp {
         self.launcher.scanning = self.scan_rx.is_some();
         let colors = self.tab_colors();
         let mut remote_events = Vec::new();
+        let mut dash_events = Vec::new();
+        let dash = (self.launcher.mode == LauncherMode::Overview).then(|| self.dashboard_cards());
         let github = &mut self.github;
         let projects = &self.projects;
         let events = tabs::launcher(
@@ -1840,7 +2157,38 @@ impl FoxGitApp {
             &open,
             &colors,
             &mut |ui, query| remote_events.extend(github.remote_page(ui, query, projects)),
+            &mut |ui| {
+                if let Some((cards, others)) = &dash {
+                    dashboard::ui(ui, cards, others, &mut dash_events);
+                }
+            },
         );
+        for e in dash_events {
+            match e {
+                dashboard::DashEvent::Open(i, v) => {
+                    if let Some(t) = self.tabs.get_mut(i) {
+                        t.view = v;
+                    }
+                    self.select_tab(i);
+                }
+                dashboard::DashEvent::Chat(repo, id) => {
+                    let i = if repo.as_os_str().is_empty() {
+                        Some(self.active)
+                    } else {
+                        self.open_repo(&repo);
+                        self.tabs.iter().position(|t| t.path == repo)
+                    };
+                    if let Some(t) = i.and_then(|i| self.tabs.get_mut(i)) {
+                        t.view = View::Agents;
+                        t.agent_chat = Some(id);
+                    }
+                }
+                dashboard::DashEvent::FetchAll => {
+                    let ctx = ui.ctx().clone();
+                    self.start_fetch_all(&ctx, true);
+                }
+            }
+        }
         for e in remote_events {
             match e {
                 RemoteEvent::Clone { url, name } => {
@@ -2548,6 +2896,28 @@ impl FoxGitApp {
         use egui::Key;
         // consume_key runs before any widget sees the keys, so text fields and
         // focus navigation (Tab) don't swallow the tab shortcuts.
+        let (find, palette) = ctx.input_mut(|i| {
+            use egui::Modifiers as M;
+            (
+                i.consume_key(M::COMMAND | M::SHIFT, Key::F),
+                // ⌘K on macOS; elsewhere Ctrl+K belongs to the shell in the terminal
+                (cfg!(target_os = "macos") && i.consume_key(M::COMMAND, Key::K))
+                    || i.consume_key(M::COMMAND | M::SHIFT, Key::P),
+            )
+        });
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Comma)) {
+            self.settings.open = !self.settings.open;
+        }
+        if find && !self.show_launcher {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.view = View::Search;
+                tab.find.focus();
+            }
+        }
+        if palette {
+            let items = self.palette_items();
+            self.palette.open(items);
+        }
         let (f5, open, new_tab, close, next, prev, num) = ctx.input_mut(|i| {
             use egui::Modifiers as M;
             let cmd = M::COMMAND;
@@ -2629,6 +2999,25 @@ impl FoxGitApp {
 
 impl eframe::App for FoxGitApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // folders from a second launch, or dropped onto the window
+        let mut open: Vec<PathBuf> = Vec::new();
+        if let Some(rx) = &self.incoming {
+            while let Ok(paths) = rx.try_recv() {
+                open.extend(paths.into_iter().map(PathBuf::from));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+        ctx.input(|i| {
+            for f in &i.raw.dropped_files {
+                let p = f.path();
+                if p.is_dir() {
+                    open.push(p.to_path_buf());
+                }
+            }
+        });
+        for p in open {
+            self.open_repo(&p);
+        }
         self.pump_jobs(ctx);
         self.poll_scan();
         self.poll_ask();
@@ -2639,7 +3028,27 @@ impl eframe::App for FoxGitApp {
         self.poll_checks();
         self.poll_publish();
         for (text, ok) in self.agents.poll() {
+            // an agent finished or stopped: tell the user even when FoxGit is in the background
+            os_notify(
+                ctx,
+                if ok {
+                    "Agent finished"
+                } else {
+                    "Agent needs you"
+                },
+                &text,
+            );
             self.notify(text, ok);
+        }
+        for (text, ok) in self.hub.poll() {
+            self.notify(text, ok);
+        }
+        if let Some(repo) = self.hub.take_created() {
+            if let Some(i) = self.tabs.iter().position(|t| t.path == repo) {
+                self.tabs[i].view = View::GitHub;
+                self.tabs[i].reload_fast();
+                self.select_tab(i);
+            }
         }
         if self.agents.any_running() {
             ctx.request_repaint_after(Duration::from_millis(250));
@@ -2653,8 +3062,28 @@ impl eframe::App for FoxGitApp {
                 ctx.request_repaint_after(every - since);
             }
         }
+        let mut notes = Vec::new();
         for tab in &mut self.tabs {
             tab.poll_history();
+            if let Some(rx) = &tab.ai_msg {
+                match rx.try_recv() {
+                    Ok(Ok(msg)) => {
+                        tab.commit_msg = msg;
+                        tab.ai_msg = None;
+                    }
+                    Ok(Err(e)) => {
+                        notes.push(e);
+                        tab.ai_msg = None;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => tab.ai_msg = None,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(200));
+                    }
+                }
+            }
+        }
+        for e in notes {
+            self.notify(e, false);
         }
         if self.running.is_some() || !self.queue.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -2666,8 +3095,14 @@ impl eframe::App for FoxGitApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(debug_assertions)]
+        self.demo_hook(&ctx);
         let mut actions = Vec::new();
         self.shortcuts(&ctx, &mut actions);
+        // the palette takes its keys (arrows, Enter, Esc) before the views see them
+        if let Some(cmd) = self.palette.ui(&ctx) {
+            self.run_cmd(cmd, &ctx, &mut actions);
+        }
 
         // Browser-style tab strip on top; the active tab blends into the toolbar below.
         let p = theme::palette(self.dark);
@@ -2699,11 +3134,59 @@ impl eframe::App for FoxGitApp {
         } else {
             let active = self.active;
             let agent_rows = self.agents.rows_for(&self.tabs[active].path);
+            let view = self.tabs[active].view;
+            let info = (view == View::GitHub
+                || (view == View::History && self.tabs[active].selected_commit.is_some()))
+            .then(|| self.hub_info(active));
+            // CI status of the commit selected in History
+            if view == View::History {
+                let tab = &self.tabs[active];
+                let ci = match (tab.selected_commit, &info) {
+                    (
+                        Some(oid),
+                        Some(hub::RepoInfo {
+                            slug: Some(slug),
+                            token: Some(token),
+                            ..
+                        }),
+                    ) => self
+                        .hub
+                        .commit_checks(slug, token, &oid.to_string())
+                        .filter(|c| c.as_ref().is_none_or(|v| !v.is_empty()))
+                        .map(|c| (oid, c)),
+                    _ => None,
+                };
+                self.tabs[active].ci = ci;
+            }
             let tab = &mut self.tabs[active];
-            // three zones: mode rail · mode sidebar · work area
+            // three zones: mode rail · mode sidebar · work area (+ the run panel below)
             views::activity_rail(ui, tab, &agent_rows);
-            views::sidebar(ui, tab, &agent_rows, &mut actions);
+            if tab.run.open {
+                let dir = tab.path.clone();
+                egui::Panel::bottom("run_panel")
+                    .resizable(true)
+                    .default_size(260.0)
+                    .size_range(120.0..=800.0)
+                    .frame(theme::panel(p.crust, 8, 6))
+                    .show(ui, |ui| tab.run.ui(ui, &dir));
+            }
+            if view == View::GitHub {
+                let info = info.as_ref().expect("computed for the GitHub view");
+                let mut acts = self.hub.sidebar(ui, info);
+                acts.extend(self.hub.main(ui, info));
+                self.apply_hub_actions(acts, &mut actions);
+            } else if view == View::Search {
+                let dir = tab.path.clone();
+                tab.find.sidebar(ui, &dir);
+                if let Some(e) = tab.find.main(ui, &dir) {
+                    actions.push(Action::Notify(e, false));
+                }
+            } else {
+                views::sidebar(ui, tab, &agent_rows, &mut actions);
+            }
+            let tab = &mut self.tabs[active];
             match tab.view {
+                View::GitHub | View::Search => {}
                 View::History => views::history_view(ui, tab, &mut actions),
                 View::FileStatus => views::file_status_view(ui, tab, &mut actions),
                 View::Agents => match tab.agent_chat.filter(|id| self.agents.has(*id)) {
@@ -2713,7 +3196,7 @@ impl eframe::App for FoxGitApp {
                     }
                     None => {
                         if self.agents.empty_view(ui) {
-                            actions.push(Action::NewAgentTask);
+                            actions.push(Action::NewAgentTask(String::new()));
                         }
                     }
                 },
@@ -2735,6 +3218,18 @@ impl eframe::App for FoxGitApp {
         }
         self.about_window(&ctx);
         self.agents.dialog_ui(&ctx);
+        let acts = self.hub.create_dialog(&ctx);
+        let mut more = Vec::new();
+        self.apply_hub_actions(acts, &mut more);
+        self.settings_window(&ctx, &mut more);
+        if !self.show_launcher {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                if let Some((text, ok)) = crate::editor::window(&ctx, tab) {
+                    self.notify(text, ok);
+                }
+            }
+        }
+        self.apply_actions(more, &ctx);
         self.github.dialog_ui(&ctx);
         self.credential_dialog(&ctx);
         self.toast_ui(&ctx);
@@ -2758,6 +3253,8 @@ impl eframe::App for FoxGitApp {
             last_update_check: self.last_update_check,
             agent_tasks: self.agents.saved(),
             last_agent: Some(self.agents.last_kind),
+            editor: self.editor_pref.clone(),
+            terminal_font: Some(self.term_font),
         };
         eframe::set_value(storage, STORAGE_KEY, &saved);
     }
@@ -2766,6 +3263,17 @@ impl eframe::App for FoxGitApp {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// A system notification + dock bounce, only while FoxGit is not the focused window.
+fn os_notify(ctx: &egui::Context, title: &str, body: &str) {
+    if ctx.input(|i| i.viewport().focused.unwrap_or(true)) {
+        return;
+    }
+    crate::desktop::notify(title, body);
+    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+        egui::UserAttentionType::Informational,
+    ));
+}
 
 /// Open THIRD-PARTY-LICENSES.txt shipped next to the program (or the copy in the source tree).
 fn open_licenses(ctx: &egui::Context) {

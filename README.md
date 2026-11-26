@@ -42,7 +42,17 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | **File Status** | stage / unstage / discard ทีละไฟล์ **ทีละ hunk หรือทีละบรรทัด** (คลิกหรือลากเลือกบรรทัด + / −) รองรับ CRLF, ไฟล์ไม่มี newline ท้ายไฟล์, encoding ที่ไม่ใช่ UTF-8 และชื่อไฟล์ภาษาไทย |
 | **Commit** | Amend, "Commit & Push" ทีเดียว, ⌘/Ctrl + Enter |
 | **Branch / Remote** | สร้าง, checkout, merge, rebase, ลบ, push (ตั้ง upstream / force-with-lease), pull (merge/rebase), fetch, clone, auto-fetch ทุกแท็บใน background |
-| **แบ่งโซนชัดเจน** | แถบไอคอนซ้ายสุดสลับ 3 โหมด: 📝 **Changes** (stage/commit), 🕘 **History** (กราฟ commit) และ ✨ **Agents** (แชตกับ AI) แต่ละโหมดมี sidebar ของตัวเอง: โหมด git แสดง branch/remote/tag/stash ส่วนโหมด Agents แสดงรายการแชต |
+| **แบ่งโซนชัดเจน** | แถบไอคอนซ้ายสุดสลับโหมด: 📝 **Changes** (stage/commit), 🕘 **History** (กราฟ commit), **GitHub** (PR / issue), 🔍 **Search** (ค้นในไฟล์) และ ✨ **Agents** (แชตกับ AI) แต่ละโหมดมี sidebar ของตัวเอง |
+| **Pull request ในโปรแกรม** | โหมด **GitHub**: รายการ PR / issue (open / closed), อ่านคำอธิบาย คอมเมนต์ review, ดู **Files** (patch ทุกไฟล์) และ **Checks** (สถานะ CI), **Merge** (merge / squash / rebase), **Approve**, **Request changes**, คอมเมนต์, ปิด/เปิดใหม่, **Checkout** PR มาเป็น branch `pr/<เลข>` (PR จาก fork ก็ได้) และกด **New pull request** สร้าง PR ได้เลย (push ให้ก่อนถ้ายังไม่ได้ push, เลือก base เป็น default branch ของ GitHub ให้) issue กด **Ask an agent** ให้ AI ทำต่อได้ |
+| **CI ของ commit** | เลือก commit ใน History จะเห็นสถานะ CI (✔ / × / กำลังรัน) และลิงก์ไปดูแต่ละ check |
+| **แก้ conflict** | ไฟล์ที่ conflict เปิดเป็นการ์ดทีละจุด กด **Use ours / Use theirs / Both** แล้ว **Save & mark resolved** หรือเลือกทั้งไฟล์, เปิดใน editor, ใช้ merge tool แถบด้านบนบอกว่ากำลัง merge / rebase / cherry-pick อยู่ พร้อมปุ่ม **Continue** และ **Abort** |
+| **Run (รันโปรเจกต์)** | ปุ่ม ▶ **Run** ที่ toolbar: script ใน `package.json` (ใช้ pnpm / yarn / bun / npm ตาม lockfile), Cargo, Makefile, Go รันใน terminal ด้านล่าง ถ้า dev server พิมพ์ URL `localhost` จะมีปุ่มเปิดในเบราว์เซอร์ |
+| **ค้นในไฟล์** | โหมด 🔍 **Search** (`Ctrl + Shift + F`): ค้นด้วย `git grep` (ตัวพิมพ์เล็ก/ใหญ่, ทั้งคำ, regex, ไฟล์ใหม่) คลิกผลลัพธ์เปิด editor ที่บรรทัดนั้น |
+| **✨ เขียน commit message ให้** | ปุ่ม **✨ Write message** ในกล่อง commit: Claude Code อ่าน diff ที่ stage ไว้แล้วเขียนข้อความตามสไตล์ commit เดิมของ repo |
+| **Command palette** | `⌘K` (macOS) / `Ctrl + Shift + P`: ค้นทุกคำสั่ง โหมด branch script โปรเจกต์ และการตั้งค่าในช่องเดียว |
+| **Dashboard** | **Projects → Dashboard**: ทุกโปรเจกต์ที่เปิดอยู่ในหน้าเดียว (branch, ↑↓, ไฟล์ที่แก้, conflict, script ที่รันอยู่, แชต agent) |
+| **Settings** | `Ctrl + ,`: ธีม, ขนาดตัวอักษร terminal, editor ที่ใช้, agent เริ่มต้น, auto-fetch, ชื่อ/อีเมลผู้เขียนของ repo นี้ |
+| **แก้ไฟล์เร็ว ๆ / หน้าต่างเดียว** | ปุ่ม **Edit** ที่หัว diff แก้ไฟล์ได้ในโปรแกรม (`⌘S` บันทึก) หรือ ↗ เปิดใน editor ที่บรรทัดที่แก้ · สั่ง `foxgit <โฟลเดอร์>` ตอนที่เปิดโปรแกรมอยู่แล้วจะเปิดเป็นแท็บในหน้าต่างเดิม ลากโฟลเดอร์มาวางที่หน้าต่างก็ได้ · แจ้งเตือนของระบบเมื่อ agent ทำงานเสร็จหรือ push/pull เสร็จตอนที่อยู่หน้าต่างอื่น |
 | **AI agents (แชตสั่งงาน)** | แถบซ้ายสุด ✨ **Agents → New chat** พิมพ์งานแล้วเลือก **Claude Code / Codex / Hermes** (ตัวที่ลงไว้ในเครื่อง) agent ทำงานในสำเนาแยก (git worktree, branch `agent/…`) ไม่แตะโฟลเดอร์ของคุณ เห็นความคืบหน้าสด พิมพ์คุยต่อได้ตลอด (ระหว่างทำงานข้อความจะเข้าคิว) เสร็จแล้วกด **Review changes** เพื่อคัดเก็บทีละ hunk/บรรทัด แล้ว **Merge** หรือ **Discard** แต่ละแชตมีแท็บ **Terminal** (terminal จริงในสำเนาของ agent กด "Continue in Claude Code" เพื่อเปิด agent แบบเต็มจอต่อ session เดิม), ปุ่ม **Open in Cursor / VS Code / Zed**, **Open in Terminal app** และ **Push & PR** |
 | **ตั้ง remote ทีหลัง** | repo ที่สร้างในเครื่อง (`git init`) กด **Add remote…** ใน sidebar แล้วใส่ URL หรือเลือก **Create on GitHub** ให้สร้าง repo บน GitHub แล้วผูก + push ให้ในขั้นตอนเดียว คลิกขวาที่ remote เพื่อแก้ชื่อ/URL หรือลบ |
 | **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
@@ -62,6 +72,9 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | `Ctrl + 1…8`, `Ctrl + 9` | ไปที่แท็บที่ 1–8, แท็บสุดท้าย |
 | `Ctrl + O` | เปิด repository |
 | `F5` | รีเฟรช |
+| `⌘K` (macOS) / `Ctrl + Shift + P` | Command palette |
+| `Ctrl + Shift + F` | ค้นในไฟล์ |
+| `Ctrl + ,` | Settings |
 | `↑` / `↓` | เลื่อนเลือก commit |
 | `Ctrl + Enter` | Commit |
 | ดับเบิลคลิก branch / ไฟล์ | Checkout / Stage–Unstage |
@@ -102,8 +115,19 @@ src/
 ├── diffview.rs    ตัวแสดง diff + stage ทีละ hunk/บรรทัด
 ├── graph.rs       อัลกอริทึมจัดเลนของกราฟ commit
 ├── git.rs         backend: อ่านด้วย libgit2, เขียนด้วย git CLI
-├── github.rs      GitHub API, Keychain, credential ให้ git
+├── github.rs      GitHub API (PR, issue, review, CI), Keychain, credential ให้ git
 ├── account.rs     หน้าต่าง Sign in, เมนูบัญชี, หน้า Remote
+├── hub.rs         โหมด GitHub: PR / issue / review / merge / สร้าง PR / CI
+├── conflict.rs    หน้าแก้ conflict ทีละจุด + Continue / Abort
+├── runner.rs      ▶ Run: หา script ของโปรเจกต์ แล้วรันใน terminal ด้านล่าง
+├── search.rs      โหมดค้นในไฟล์ (git grep)
+├── palette.rs     Command palette
+├── editor.rs      แก้ไฟล์เร็ว ๆ ในโปรแกรม
+├── aicommit.rs    ✨ เขียน commit message ด้วย Claude Code
+├── agents.rs      แชต AI agent (Claude Code / Codex / Hermes) ใน git worktree
+├── terminal.rs    terminal ในตัว (PTY + vt100)
+├── desktop.rs     หา editor / terminal app, แจ้งเตือนของระบบ
+├── instance.rs    โหมดหน้าต่างเดียว (ส่งโฟลเดอร์ให้หน้าต่างที่เปิดอยู่)
 ├── askpass.rs     หน้าต่างถามรหัสผ่านให้ git/ssh
 ├── shellenv.rs    PATH จาก login shell + ตรวจว่ามี git
 └── update.rs      เช็กเวอร์ชันใหม่จาก GitHub Releases
@@ -113,8 +137,8 @@ src/
 
 ### ข้อจำกัดตอนนี้
 
-- ยังไม่มีหน้าช่วยแก้ conflict (มีแถบเตือนและปุ่ม Abort merge)
-- เปิดโปรแกรมซ้ำจะได้หน้าต่างใหม่ (ยังไม่มีโหมดหน้าต่างเดียว)
+- คำอธิบาย PR / คอมเมนต์แสดงเป็นข้อความ Markdown ดิบ (ยังไม่จัดรูปแบบ) และยังคอมเมนต์ทีละบรรทัดในโค้ดของ PR ไม่ได้ (ทำบน GitHub)
+- ✨ Write message ต้องมี Claude Code (`claude`) ในเครื่อง
 - stage ทีละ hunk/บรรทัดได้เฉพาะไฟล์ที่แก้ไข (ไฟล์ใหม่/ลบ/conflict ต้อง stage ทั้งไฟล์)
 - ไม่รองรับ bare repository
 - repo ของ org จะขึ้นในหน้า Remote เฉพาะเมื่อ token มีสิทธิ์เข้าถึง (fine-grained token: เลือก org เป็น resource owner, classic token ของ org ที่ใช้ SSO: กด Configure SSO → Authorize ที่ token นั้น)

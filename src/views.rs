@@ -444,6 +444,8 @@ pub fn activity_rail(ui: &mut egui::Ui, tab: &mut RepoTab, agent_rows: &[crate::
         )
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 6.0;
+            let gh = egui::special_emojis::GITHUB.to_string();
+            let search_tip = format!("Search in files ({})", theme::shortcut("Shift+F"));
             let items = [
                 (
                     View::FileStatus,
@@ -461,6 +463,15 @@ pub fn activity_rail(ui: &mut egui::Ui, tab: &mut RepoTab, agent_rows: &[crate::
                     0,
                     false,
                 ),
+                (
+                    View::GitHub,
+                    gh.as_str(),
+                    "GitHub",
+                    "GitHub — pull requests, reviews, CI and issues",
+                    0,
+                    false,
+                ),
+                (View::Search, "🔍", "Search", search_tip.as_str(), 0, false),
                 (
                     View::Agents,
                     "✨",
@@ -572,7 +583,7 @@ fn agents_sidebar(
         .on_hover_text("Ask Claude Code, Codex or Hermes to work on this repository")
         .clicked()
     {
-        actions.push(Action::NewAgentTask);
+        actions.push(Action::NewAgentTask(String::new()));
     }
     ui.add_space(8.0);
     if rows.is_empty() {
@@ -1012,7 +1023,7 @@ pub fn history_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Acti
         });
 
     egui::CentralPanel::default().show(ui, |ui| {
-        merge_banner(ui, tab, actions);
+        crate::conflict::banner(ui, tab, actions);
         ui.horizontal(|ui| {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut tab.search)
@@ -1038,38 +1049,6 @@ pub fn history_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Acti
         ui.add_space(6.0);
         commit_list(ui, tab, actions);
     });
-}
-
-fn merge_banner(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
-    let state = tab.repo.repo.state();
-    if state == git2::RepositoryState::Clean {
-        return;
-    }
-    let p = pal(ui);
-    egui::Frame::new()
-        .fill(theme::alpha(p.yellow, 0.12))
-        .stroke(Stroke::new(1.0, theme::alpha(p.yellow, 0.35)))
-        .inner_margin(egui::Margin::symmetric(10, 6))
-        .corner_radius(8.0)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "⚠  Repository state: {state:?} — resolve conflicts, then commit."
-                    ))
-                    .color(p.yellow),
-                );
-                if state == git2::RepositoryState::Merge && ui.button("Abort merge").clicked() {
-                    actions.push(Action::Dialog(Dialog::Confirm {
-                        title: "Abort merge".into(),
-                        text: "Abort the merge and discard merge changes?".into(),
-                        op: Op::AbortMerge,
-                        danger: true,
-                    }));
-                }
-            });
-        });
-    ui.add_space(6.0);
 }
 
 fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
@@ -1787,6 +1766,16 @@ fn commit_details(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action
                                 ui.label(RichText::new("Date").weak());
                                 ui.label(format_time(&c));
                                 ui.end_row();
+                                if let Some(checks) = tab.ci.as_ref().filter(|(o, _)| *o == oid) {
+                                    ui.label(RichText::new("CI").weak());
+                                    ui.horizontal(|ui| match &checks.1 {
+                                        Some(list) => crate::hub::checks_summary(ui, list),
+                                        None => {
+                                            ui.add(egui::Spinner::new().size(12.0));
+                                        }
+                                    });
+                                    ui.end_row();
+                                }
                             });
                         ui.add_space(6.0);
                         ui.label(RichText::new(c.message.trim_end()).strong());
@@ -1904,7 +1893,7 @@ pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<
         .default_size(420.0)
         .size_range(240.0..=800.0)
         .show(ui, |ui| {
-            merge_banner(ui, tab, actions);
+            crate::conflict::banner(ui, tab, actions);
             let unborn = tab.repo.is_head_unborn();
             let half = (ui.available_height() / 2.0 - 30.0).max(80.0);
 
@@ -2023,10 +2012,26 @@ pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("No local changes").weak());
             });
+        } else if let Some(path) = selected_conflict(tab) {
+            crate::conflict::view(ui, tab, &path, actions);
         } else {
             diffview::diff_view(ui, tab, actions);
         }
     });
+}
+
+/// The selected working-copy file, if it has conflicts.
+fn selected_conflict(tab: &RepoTab) -> Option<String> {
+    let path = match &tab.diff_target {
+        Some(DiffTarget::Unstaged { path } | DiffTarget::Staged { path }) => path,
+        _ => return None,
+    };
+    tab.status
+        .unstaged
+        .iter()
+        .chain(&tab.status.staged)
+        .any(|f| &f.path == path && f.kind == ChangeKind::Conflicted)
+        .then(|| path.clone())
 }
 
 pub fn discard_dialog(f: &FileChange, tracked: Vec<String>, untracked: Vec<String>) -> Dialog {
@@ -2068,6 +2073,25 @@ fn commit_box(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
                 .color(p.text_strong),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if tab.ai_msg.is_some() {
+                ui.add(egui::Spinner::new().size(14.0));
+                ui.label(
+                    RichText::new("Writing a message…")
+                        .small()
+                        .color(p.accent_hover),
+                );
+            } else {
+                let r = ui
+                    .add_enabled(
+                        !tab.status.staged.is_empty(),
+                        egui::Button::new(RichText::new("✨ Write message").small()),
+                    )
+                    .on_hover_text("Claude Code writes a commit message from the staged changes")
+                    .on_disabled_hover_text("Stage some changes first");
+                if r.clicked() {
+                    actions.push(Action::AiCommitMessage);
+                }
+            }
             ui.label(
                 RichText::new(format!("{} to commit", theme::shortcut("Enter")))
                     .weak()

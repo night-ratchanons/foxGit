@@ -23,6 +23,11 @@ pub fn path() -> Option<&'static str> {
     LOGIN_PATH.get().and_then(|p| p.as_deref())
 }
 
+/// The login-shell `PATH` lookup has finished.
+pub fn ready() -> bool {
+    LOGIN_PATH.get().is_some()
+}
+
 /// Block until the login-shell `PATH` is known (for background threads only).
 pub fn wait_path() -> Option<&'static str> {
     LOGIN_PATH.wait().as_deref()

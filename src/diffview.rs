@@ -165,6 +165,37 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
                     }
                     DiffTarget::Commit { .. } => {}
                 }
+                if let DiffTarget::Staged { path } | DiffTarget::Unstaged { path } = &target {
+                    let full = tab.path.join(path);
+                    if full.is_file() {
+                        if ui
+                            .button("↗")
+                            .on_hover_text("Open in your code editor")
+                            .clicked()
+                        {
+                            let line = tab
+                                .diff
+                                .as_ref()
+                                .and_then(|d| d.as_ref().ok())
+                                .and_then(|d| d.first_new_line());
+                            if let Err(e) =
+                                crate::desktop::open_in_editor(&tab.path, Some(&full), line)
+                            {
+                                actions.push(Action::Notify(e, false));
+                            }
+                        }
+                        if ui
+                            .button("Edit")
+                            .on_hover_text("Quick edit inside FoxGit")
+                            .clicked()
+                        {
+                            match crate::editor::EditState::open(&tab.path, path) {
+                                Ok(st) => tab.edit = Some(st),
+                                Err(e) => actions.push(Action::Notify(e, false)),
+                            }
+                        }
+                    }
+                }
                 ui.separator();
                 if ui.small_button("+").on_hover_text("More context").clicked() {
                     tab.context_lines = (tab.context_lines + 3).min(100);

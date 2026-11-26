@@ -641,6 +641,8 @@ pub enum LauncherEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LauncherMode {
+    /// Every open project and agent chat at a glance.
+    Overview,
     /// Saved projects on this computer.
     Local,
     /// Repositories of the signed-in GitHub account.
@@ -691,6 +693,7 @@ pub fn launcher(
     open_paths: &[String],
     open_colors: &[Color32],
     remote: &mut dyn FnMut(&mut egui::Ui, &str),
+    overview: &mut dyn FnMut(&mut egui::Ui),
 ) -> Vec<LauncherEvent> {
     let mut ev = Vec::new();
     let q = st.query.trim().to_lowercase();
@@ -714,13 +717,10 @@ pub fn launcher(
         ui.horizontal(|ui| {
             ui.label(RichText::new("Projects").size(26.0).strong().color(p.text_strong));
             ui.add_space(12.0);
-            let mut idx = usize::from(st.mode == LauncherMode::Remote);
-            if theme::segmented(ui, &["Local", "Remote"], &mut idx) {
-                st.mode = if idx == 1 {
-                    LauncherMode::Remote
-                } else {
-                    LauncherMode::Local
-                };
+            let modes = [LauncherMode::Overview, LauncherMode::Local, LauncherMode::Remote];
+            let mut idx = modes.iter().position(|m| *m == st.mode).unwrap_or(1);
+            if theme::segmented(ui, &["Dashboard", "Local", "Remote"], &mut idx) {
+                st.mode = modes[idx];
                 st.focus_search = true;
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -733,6 +733,10 @@ pub fn launcher(
             });
         });
         ui.add_space(14.0);
+        if st.mode == LauncherMode::Overview {
+            overview(ui);
+            return;
+        }
 
         // Search / path box
         let remote_mode = st.mode == LauncherMode::Remote;

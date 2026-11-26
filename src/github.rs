@@ -79,26 +79,62 @@ fn api_get(token: &str, path: &str) -> Result<String, ApiError> {
 
 /// GET (`body` = None) or POST a JSON body to the GitHub REST API.
 fn api(token: &str, path: &str, body: Option<serde_json::Value>) -> Result<String, ApiError> {
-    let url = format!("{API}{path}");
+    api_method(
+        token,
+        if body.is_some() { "POST" } else { "GET" },
+        path,
+        body,
+    )
+}
+
+/// Any REST call (GET / POST / PUT / PATCH / DELETE) with an optional JSON body.
+fn api_method(
+    token: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<String, ApiError> {
+    let url = if path.starts_with("https://") {
+        path.to_string()
+    } else {
+        format!("{API}{path}")
+    };
     let auth = format!("Bearer {token}");
-    let res = match body {
-        None => agent()
+    let a = agent();
+    macro_rules! send {
+        ($req:expr) => {{
+            let req = $req
+                .header("Authorization", &auth)
+                .header("Accept", "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28");
+            match body {
+                Some(json) => req.send_json(json),
+                None => req.send_empty(),
+            }
+        }};
+    }
+    let res = match method {
+        "POST" => send!(a.post(&url)),
+        "PUT" => send!(a.put(&url)),
+        "PATCH" => send!(a.patch(&url)),
+        "DELETE" => a
+            .delete(&url)
+            .header("Authorization", &auth)
+            .header("Accept", "application/vnd.github+json")
+            .call(),
+        _ => a
             .get(&url)
             .header("Authorization", &auth)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .call(),
-        Some(json) => agent()
-            .post(&url)
-            .header("Authorization", &auth)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send_json(json),
     };
     let mut r = res.map_err(net)?;
     let status = r.status().as_u16();
     let body = r
         .body_mut()
+        .with_config()
+        .limit(64 * 1024 * 1024)
         .read_to_string()
         .map_err(|e| ApiError::Other(e.to_string()))?;
     if (200..300).contains(&status) {
@@ -110,6 +146,337 @@ fn api(token: &str, path: &str, body: Option<serde_json::Value>) -> Result<Strin
         ),
         _ => ApiError::Other(format!("GitHub: {} (HTTP {status})", error_message(&body))),
     })
+}
+
+fn json<T: serde::de::DeserializeOwned>(body: &str) -> Result<T, ApiError> {
+    serde_json::from_str(body)
+        .map_err(|e| ApiError::Other(format!("Unexpected answer from GitHub: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Pull requests, issues, checks
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Who {
+    pub login: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PullRef {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub sha: String,
+    #[serde(default)]
+    pub label: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Label {
+    pub name: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Pull {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub state: String,
+    #[serde(default)]
+    pub draft: bool,
+    pub user: Who,
+    pub html_url: String,
+    pub head: PullRef,
+    pub base: PullRef,
+    #[serde(default)]
+    pub merged: Option<bool>,
+    #[serde(default)]
+    pub merged_at: Option<String>,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub mergeable: Option<bool>,
+    #[serde(default)]
+    pub mergeable_state: Option<String>,
+    #[serde(default)]
+    pub additions: Option<u64>,
+    #[serde(default)]
+    pub deletions: Option<u64>,
+    #[serde(default)]
+    pub changed_files: Option<u64>,
+    #[serde(default)]
+    pub labels: Vec<Label>,
+}
+
+impl Pull {
+    pub fn is_merged(&self) -> bool {
+        self.merged == Some(true) || self.merged_at.is_some()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PullFile {
+    pub filename: String,
+    pub status: String,
+    #[serde(default)]
+    pub additions: u64,
+    #[serde(default)]
+    pub deletions: u64,
+    #[serde(default)]
+    pub patch: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Comment {
+    pub user: Who,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Review {
+    pub user: Who,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub state: String,
+    #[serde(default)]
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct Issue {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub state: String,
+    pub user: Who,
+    pub html_url: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub labels: Vec<Label>,
+    #[serde(default)]
+    pub comments: u64,
+    #[serde(default)]
+    pub pull_request: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckState {
+    Pending,
+    Success,
+    Failure,
+    Neutral,
+}
+
+#[derive(Clone, Debug)]
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+    pub url: Option<String>,
+}
+
+pub fn list_pulls(token: &str, slug: &str, state: &str) -> Result<Vec<Pull>, ApiError> {
+    json(&api_get(
+        token,
+        &format!("/repos/{slug}/pulls?state={state}&per_page=60&sort=updated&direction=desc"),
+    )?)
+}
+
+pub fn get_pull(token: &str, slug: &str, n: u64) -> Result<Pull, ApiError> {
+    json(&api_get(token, &format!("/repos/{slug}/pulls/{n}"))?)
+}
+
+pub fn pull_files(token: &str, slug: &str, n: u64) -> Result<Vec<PullFile>, ApiError> {
+    let mut all: Vec<PullFile> = Vec::new();
+    for page in 1..=5 {
+        let batch: Vec<PullFile> = json(&api_get(
+            token,
+            &format!("/repos/{slug}/pulls/{n}/files?per_page=100&page={page}"),
+        )?)?;
+        let len = batch.len();
+        all.extend(batch);
+        if len < 100 {
+            break;
+        }
+    }
+    Ok(all)
+}
+
+pub fn issue_comments(token: &str, slug: &str, n: u64) -> Result<Vec<Comment>, ApiError> {
+    json(&api_get(
+        token,
+        &format!("/repos/{slug}/issues/{n}/comments?per_page=100"),
+    )?)
+}
+
+pub fn pull_reviews(token: &str, slug: &str, n: u64) -> Result<Vec<Review>, ApiError> {
+    json(&api_get(
+        token,
+        &format!("/repos/{slug}/pulls/{n}/reviews?per_page=100"),
+    )?)
+}
+
+/// GitHub Actions check runs and classic commit statuses for one commit, as one list.
+pub fn checks(token: &str, slug: &str, sha: &str) -> Result<Vec<Check>, ApiError> {
+    #[derive(Deserialize)]
+    struct Run {
+        name: String,
+        status: String,
+        #[serde(default)]
+        conclusion: Option<String>,
+        #[serde(default)]
+        html_url: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Runs {
+        check_runs: Vec<Run>,
+    }
+    #[derive(Deserialize)]
+    struct Ctx {
+        context: String,
+        state: String,
+        #[serde(default)]
+        target_url: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Combined {
+        statuses: Vec<Ctx>,
+    }
+    let runs: Runs = json(&api_get(
+        token,
+        &format!("/repos/{slug}/commits/{sha}/check-runs?per_page=100"),
+    )?)?;
+    let mut out: Vec<Check> = runs
+        .check_runs
+        .into_iter()
+        .map(|r| Check {
+            state: match (r.status.as_str(), r.conclusion.as_deref()) {
+                ("completed", Some("success")) => CheckState::Success,
+                (
+                    "completed",
+                    Some(
+                        "failure" | "timed_out" | "cancelled" | "action_required"
+                        | "startup_failure",
+                    ),
+                ) => CheckState::Failure,
+                ("completed", _) => CheckState::Neutral,
+                _ => CheckState::Pending,
+            },
+            name: r.name,
+            url: r.html_url,
+        })
+        .collect();
+    if let Ok(body) = api_get(token, &format!("/repos/{slug}/commits/{sha}/status")) {
+        if let Ok(c) = serde_json::from_str::<Combined>(&body) {
+            out.extend(c.statuses.into_iter().map(|s| Check {
+                state: match s.state.as_str() {
+                    "success" => CheckState::Success,
+                    "failure" | "error" => CheckState::Failure,
+                    _ => CheckState::Pending,
+                },
+                name: s.context,
+                url: s.target_url,
+            }));
+        }
+    }
+    Ok(out)
+}
+
+pub fn create_pull(
+    token: &str,
+    slug: &str,
+    title: &str,
+    body: &str,
+    head: &str,
+    base: &str,
+    draft: bool,
+) -> Result<Pull, ApiError> {
+    json(&api(
+        token,
+        &format!("/repos/{slug}/pulls"),
+        Some(
+            serde_json::json!({"title": title, "body": body, "head": head, "base": base, "draft": draft}),
+        ),
+    )?)
+}
+
+/// method: "merge" | "squash" | "rebase"
+pub fn merge_pull(token: &str, slug: &str, n: u64, method: &str) -> Result<(), ApiError> {
+    api_method(
+        token,
+        "PUT",
+        &format!("/repos/{slug}/pulls/{n}/merge"),
+        Some(serde_json::json!({"merge_method": method})),
+    )
+    .map(|_| ())
+}
+
+pub fn add_comment(token: &str, slug: &str, n: u64, body: &str) -> Result<(), ApiError> {
+    api(
+        token,
+        &format!("/repos/{slug}/issues/{n}/comments"),
+        Some(serde_json::json!({"body": body})),
+    )
+    .map(|_| ())
+}
+
+/// event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
+pub fn submit_review(
+    token: &str,
+    slug: &str,
+    n: u64,
+    event: &str,
+    body: &str,
+) -> Result<(), ApiError> {
+    api(
+        token,
+        &format!("/repos/{slug}/pulls/{n}/reviews"),
+        Some(serde_json::json!({"event": event, "body": body})),
+    )
+    .map(|_| ())
+}
+
+/// Close or reopen an issue or pull request ("closed" / "open").
+pub fn set_state(token: &str, slug: &str, n: u64, state: &str) -> Result<(), ApiError> {
+    api_method(
+        token,
+        "PATCH",
+        &format!("/repos/{slug}/issues/{n}"),
+        Some(serde_json::json!({"state": state})),
+    )
+    .map(|_| ())
+}
+
+/// Open issues (GitHub lists pull requests as issues too; those are dropped).
+pub fn list_issues(token: &str, slug: &str, state: &str) -> Result<Vec<Issue>, ApiError> {
+    let all: Vec<Issue> = json(&api_get(
+        token,
+        &format!("/repos/{slug}/issues?state={state}&per_page=60&sort=updated&direction=desc"),
+    )?)?;
+    Ok(all
+        .into_iter()
+        .filter(|i| i.pull_request.is_none())
+        .collect())
+}
+
+pub fn get_issue(token: &str, slug: &str, n: u64) -> Result<Issue, ApiError> {
+    json(&api_get(token, &format!("/repos/{slug}/issues/{n}"))?)
+}
+
+/// The repository's default branch (for a new pull request's base).
+pub fn default_branch(token: &str, slug: &str) -> Result<String, ApiError> {
+    #[derive(Deserialize)]
+    struct R {
+        default_branch: String,
+    }
+    json::<R>(&api_get(token, &format!("/repos/{slug}"))?).map(|r| r.default_branch)
 }
 
 /// The human part of a GitHub error response, e.g. "name already exists on this account".
@@ -336,6 +703,67 @@ pub fn repo_slug(url: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Parses real GitHub responses into our types (public data, no token; ~8 requests).
+    /// `cargo test gh_live -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn gh_live_responses_parse() {
+        let get = |path: &str| -> String {
+            let mut res = agent()
+                .get(format!("{API}{path}"))
+                .header("Accept", "application/vnd.github+json")
+                .call()
+                .unwrap();
+            assert!(res.status().is_success(), "{path}: {}", res.status());
+            res.body_mut()
+                .with_config()
+                .limit(64 << 20)
+                .read_to_string()
+                .unwrap()
+        };
+        let slug = "cli/cli";
+        let pulls: Vec<Pull> =
+            serde_json::from_str(&get(&format!("/repos/{slug}/pulls?state=open&per_page=5")))
+                .unwrap();
+        assert!(!pulls.is_empty());
+        let n = pulls[0].number;
+        let pr: Pull = serde_json::from_str(&get(&format!("/repos/{slug}/pulls/{n}"))).unwrap();
+        println!(
+            "#{} {} +{:?} -{:?} mergeable={:?} {:?}",
+            pr.number, pr.title, pr.additions, pr.deletions, pr.mergeable, pr.mergeable_state
+        );
+        let files: Vec<PullFile> =
+            serde_json::from_str(&get(&format!("/repos/{slug}/pulls/{n}/files?per_page=5")))
+                .unwrap();
+        println!(
+            "{} file(s), first: {:?}",
+            files.len(),
+            files.first().map(|f| &f.filename)
+        );
+        let _: Vec<Comment> = serde_json::from_str(&get(&format!(
+            "/repos/{slug}/issues/{n}/comments?per_page=5"
+        )))
+        .unwrap();
+        let _: Vec<Review> =
+            serde_json::from_str(&get(&format!("/repos/{slug}/pulls/{n}/reviews?per_page=5")))
+                .unwrap();
+        let issues: Vec<Issue> =
+            serde_json::from_str(&get(&format!("/repos/{slug}/issues?state=open&per_page=5")))
+                .unwrap();
+        println!(
+            "{} issue(s)/PRs, {} real issues",
+            issues.len(),
+            issues.iter().filter(|i| i.pull_request.is_none()).count()
+        );
+        let runs: serde_json::Value = serde_json::from_str(&get(&format!(
+            "/repos/{slug}/commits/{}/check-runs?per_page=5",
+            pr.head.sha
+        )))
+        .unwrap();
+        println!("check runs: {}", runs["total_count"]);
+    }
+
     use super::*;
 
     #[test]
