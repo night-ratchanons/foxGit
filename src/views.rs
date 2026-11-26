@@ -590,6 +590,13 @@ fn agents_sidebar(
         ui.label(RichText::new("No chats yet.").color(p.faint));
         return;
     }
+    let mut board = SideRow::new(ui, "▦", "Board — all chats");
+    board.selected = tab.agent_chat.is_none();
+    board.icon_color = p.accent_hover;
+    if side_row(ui, board).clicked() {
+        tab.agent_chat = None;
+    }
+    ui.add_space(4.0);
     for r in rows {
         let (icon, color, state) = match r.status {
             Status::Running => ("⟳", p.accent_hover, "working…"),
@@ -630,7 +637,11 @@ fn agents_sidebar(
             FontId::proportional(13.0),
             if selected { p.sel_text } else { p.text_strong },
         );
-        let mut sub = format!("{} · {state}", r.kind.name());
+        let mut sub = if r.terminal {
+            format!("⌨ {} · {state}", r.kind.name())
+        } else {
+            format!("{} · {state}", r.kind.name())
+        };
         if r.queued > 0 {
             sub.push_str(&format!(" · {} queued", r.queued));
         }

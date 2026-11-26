@@ -18,6 +18,10 @@ pub struct SettingsState {
     email: String,
     /// What applies when the repository sets nothing (global config).
     inherited: (String, String),
+    new_profile: String,
+    new_profile_kind: Option<AgentKind>,
+    snip_name: String,
+    snip_text: String,
 }
 
 fn read_identity(repo: &git2::Repository) -> (String, String, (String, String)) {
@@ -70,6 +74,8 @@ impl FoxGitApp {
             .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 90.0))
             .collapsible(false)
             .resizable(false)
+            .vscroll(true)
+            .max_height((ctx.content_rect().height() - 140.0).max(300.0))
             .default_width(460.0)
             .show(ctx, |ui| {
                 let p = pal(ui);
@@ -192,6 +198,116 @@ impl FoxGitApp {
                             });
                         ui.end_row();
                     });
+
+                heading(ui, "AGENT PROFILES");
+                ui.label(
+                    RichText::new("Separate accounts / settings for an agent CLI (its own config folder). Pick one in New chat.")
+                        .small()
+                        .color(p.faint),
+                );
+                let mut remove = None;
+                let mut login = None;
+                for (i, pr) in self.agents.profiles.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&pr.name).strong().color(p.text_strong));
+                        ui.label(RichText::new(pr.kind.name()).color(p.subtext));
+                        ui.label(RichText::new(pr.dir.display().to_string()).small().color(p.faint))
+                            .on_hover_text(format!("{}={}", crate::prompts::Profile::env_var(pr.kind), pr.dir.display()));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(i);
+                            }
+                            if ui
+                                .small_button("Sign in…")
+                                .on_hover_text("Open the agent with this profile in a terminal (Run panel) to log in")
+                                .clicked()
+                            {
+                                login = Some(pr.clone());
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = remove {
+                    let mut v = self.agents.profiles.clone();
+                    v.remove(i);
+                    self.agents.set_profiles(v);
+                }
+                if let Some(pr) = login {
+                    match (self.tabs.get_mut(self.active), pr.kind.find()) {
+                        (Some(tab), Some(exe)) => {
+                            let dir = tab.path.clone();
+                            let _ = std::fs::create_dir_all(&pr.dir);
+                            tab.run.envs = pr.env();
+                            let cmd = crate::agents::shell_quote(&exe.to_string_lossy());
+                            if let Err(e) = tab.run.start(&dir, ui.ctx(), &format!("{} · {}", pr.kind.name(), pr.name), Some(&cmd)) {
+                                actions.push(Action::Notify(e, false));
+                            }
+                            tab.run.envs.clear();
+                        }
+                        (None, _) => actions.push(Action::Notify("Open a repository first".into(), false)),
+                        (_, None) => actions.push(Action::Notify(format!("{} isn't installed", pr.kind.name()), false)),
+                    }
+                }
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.new_profile).hint_text("Profile name, e.g. work").desired_width(150.0));
+                    let kind = self.settings.new_profile_kind.get_or_insert(AgentKind::Claude);
+                    egui::ComboBox::from_id_salt("settings_profile_kind")
+                        .selected_text(kind.name())
+                        .width(120.0)
+                        .show_ui(ui, |ui| {
+                            for k in AgentKind::ALL {
+                                ui.selectable_value(kind, k, k.name());
+                            }
+                        });
+                    let kind = *kind;
+                    let name = self.settings.new_profile.trim().to_string();
+                    let taken = self.agents.profiles.iter().any(|x| x.name == name && x.kind == kind);
+                    if ui.add_enabled(!name.is_empty() && !taken, egui::Button::new("Add profile")).clicked() {
+                        let mut v = self.agents.profiles.clone();
+                        v.push(crate::prompts::Profile {
+                            dir: crate::prompts::Profile::default_dir(kind, &name),
+                            name,
+                            kind,
+                        });
+                        self.agents.set_profiles(v);
+                        self.settings.new_profile.clear();
+                    }
+                });
+
+                heading(ui, "PROMPT SNIPPETS");
+                ui.label(
+                    RichText::new("Your own chips above the agent's message box (next to the built-in ones).")
+                        .small()
+                        .color(p.faint),
+                );
+                let mut drop = None;
+                for (i, sn) in self.agents.snippets.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&sn.name).strong().color(p.text_strong));
+                        ui.add(egui::Label::new(RichText::new(&sn.text).small().color(p.faint)).truncate());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                drop = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = drop {
+                    self.agents.snippets.remove(i);
+                }
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.snip_name).hint_text("Name").desired_width(110.0));
+                    ui.add(egui::TextEdit::singleline(&mut self.settings.snip_text).hint_text("Message for the agent").desired_width(230.0));
+                    let ok = !self.settings.snip_name.trim().is_empty() && !self.settings.snip_text.trim().is_empty();
+                    if ui.add_enabled(ok, egui::Button::new("Add")).clicked() {
+                        self.agents.snippets.push(crate::prompts::Snippet {
+                            name: self.settings.snip_name.trim().to_string(),
+                            text: self.settings.snip_text.trim().to_string(),
+                        });
+                        self.settings.snip_name.clear();
+                        self.settings.snip_text.clear();
+                    }
+                });
 
                 heading(ui, "THIS REPOSITORY — AUTHOR");
                 match self.tabs.get(self.active).filter(|_| tab_path.is_some()) {

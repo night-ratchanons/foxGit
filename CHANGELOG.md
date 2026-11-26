@@ -20,6 +20,24 @@ into the GitHub Release notes.
   interface on the same session), **Open in Cursor / VS Code / Zed**, **Open in Terminal app**,
   and **Push & PR** (commit, push the branch, open GitHub's new pull request page).
 
+### New: a bigger Agents workspace
+- Every agent chat is a workspace with three tabs: **Chat**, **Changes** (everything the agent
+  changed since its base, file by file — select lines, write comments, send them all to the
+  agent as one review) and **Terminal** (several terminals in the agent's copy: its own
+  full-screen interface, shells, and the project's scripts with Open in browser).
+- New chat: **Chat** or **Terminal** mode, pick a **model** and a **profile**, **Plan first**,
+  and run the same task on **several agents / several times** at once — they start side by side
+  and the **board** compares them (status, changes, cost, last message, Merge / Discard).
+- Message box: prompt **chips** (Plan first, Write tests, Review yourself, Explain … plus your
+  own from Settings), **@ attach files**, model switch and **Plan mode** per chat.
+- Chat menu: Rename, **Retry with another agent**, **Update from <base>** (merge the base's new
+  commits into the agent's copy), **Run tests**.
+- **Profiles** (Settings → Agent profiles): separate accounts / configs per agent CLI
+  (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `HERMES_HOME`), with Sign in….
+- Quitting FoxGit stops running agents (the next message resumes the same session).
+- Push dialog: pick the local branch, the remote and the remote branch (existing or new) from
+  lists; the picked target is used even without "set upstream".
+
 ### New: everything in one window
 - **GitHub mode** (new rail button): the repository's **pull requests** and **issues**, open or
   closed, with a filter. A pull request shows its conversation (description, comments, reviews),

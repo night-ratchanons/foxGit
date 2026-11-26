@@ -884,6 +884,14 @@ pub enum Op {
         set_upstream: Option<(String, String)>,
         force: bool,
     },
+    /// Push `local` to `remote_branch` on `remote` (picked in the Push dialog).
+    PushTo {
+        remote: String,
+        local: String,
+        remote_branch: String,
+        set_upstream: bool,
+        force: bool,
+    },
     StashSave(String),
     StashPop(usize),
     StashApply(usize),
@@ -927,6 +935,11 @@ pub enum Op {
         remote: String,
         message: String,
         commit_first: bool,
+    },
+    /// Bring the base branch's new commits into an agent's worktree (`git merge <base>`).
+    AgentSync {
+        worktree: String,
+        base: String,
     },
     /// Delete an agent's worktree (and its branch).
     AgentCleanup {
@@ -1031,6 +1044,18 @@ impl Op {
             Op::Fetch => "Fetch".into(),
             Op::Pull { .. } => "Pull".into(),
             Op::Push { .. } => "Push".into(),
+            Op::PushTo {
+                remote,
+                local,
+                remote_branch,
+                ..
+            } => {
+                if local == remote_branch {
+                    format!("Push {local} to {remote}")
+                } else {
+                    format!("Push {local} to {remote}/{remote_branch}")
+                }
+            }
             Op::StashSave(_) => "Stash".into(),
             Op::StashPop(i) => format!("Pop stash@{{{i}}}"),
             Op::StashApply(i) => format!("Apply stash@{{{i}}}"),
@@ -1048,6 +1073,7 @@ impl Op {
             }
             Op::AgentCleanup { branch, .. } => format!("Discard {branch}"),
             Op::AgentPush { branch, .. } => format!("Push {branch}"),
+            Op::AgentSync { base, .. } => format!("Update agent's copy from {base}"),
             Op::CheckoutPr { number, .. } => format!("Checkout pull request #{number}"),
             Op::ResolveWith { paths, theirs } => format!(
                 "Resolve {} file(s) using {}",
@@ -1171,6 +1197,25 @@ impl Op {
                 }
                 vec![(c, None)]
             }
+            Op::PushTo {
+                remote,
+                local,
+                remote_branch,
+                set_upstream,
+                force,
+            } => {
+                let mut c = s(&["push"]);
+                if *force {
+                    c.push("--force-with-lease".into());
+                }
+                if *set_upstream {
+                    c.push("-u".into());
+                }
+                c.push(remote.clone());
+                // full ref names: also creates a remote branch with a different name
+                c.push(format!("refs/heads/{local}:refs/heads/{remote_branch}"));
+                vec![(c, None)]
+            }
             Op::StashSave(msg) => {
                 let mut c = s(&["stash", "push", "--include-untracked"]);
                 if !msg.trim().is_empty() {
@@ -1255,6 +1300,9 @@ impl Op {
                 }
                 v.push((s(&["push", "-u", remote, branch]), None));
                 v
+            }
+            Op::AgentSync { worktree, base } => {
+                vec![(s(&["-C", worktree, "merge", "--no-edit", base]), None)]
             }
             Op::AgentCleanup {
                 worktree,
@@ -1787,6 +1835,80 @@ mod tests {
         assert_eq!(remote.trim(), "Agent work");
         let up = git_out(d, &["rev-parse", "--abbrev-ref", "agent/push@{upstream}"]);
         assert_eq!(up.trim(), "origin/agent/push");
+    }
+
+    #[test]
+    fn agent_sync_merges_new_base_commits() {
+        let t = setup();
+        let d = t.path();
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt = wt_dir.path().join("task");
+        let wts = wt.display().to_string();
+        git(
+            d,
+            &["worktree", "add", "-q", "-b", "agent/sync", &wts, "main"],
+        );
+        fs::write(wt.join("agent.txt"), "agent\n").unwrap();
+        git(&wt, &["add", "."]);
+        git(&wt, &["commit", "-q", "-m", "agent work"]);
+        fs::write(d.join("base.txt"), "base\n").unwrap();
+        git(d, &["add", "."]);
+        git(d, &["commit", "-q", "-m", "base moved on"]);
+        let out = Op::AgentSync {
+            worktree: wts,
+            base: "main".into(),
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert!(wt.join("base.txt").exists() && wt.join("agent.txt").exists());
+    }
+
+    #[test]
+    fn push_to_a_picked_remote_branch() {
+        let t = setup();
+        let d = t.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            d,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &bare.path().display().to_string(),
+            ],
+        );
+        // a branch that isn't checked out, to a remote branch with another name, no upstream
+        let out = Op::PushTo {
+            remote: "origin".into(),
+            local: "feature".into(),
+            remote_branch: "review/feature".into(),
+            set_upstream: false,
+            force: false,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(
+            git_out(bare.path(), &["log", "-1", "--format=%s", "review/feature"]).trim(),
+            "add b"
+        );
+        assert!(git_out(d, &["config", "--get", "branch.feature.remote"])
+            .trim()
+            .is_empty());
+        // same name with upstream
+        let out = Op::PushTo {
+            remote: "origin".into(),
+            local: "main".into(),
+            remote_branch: "main".into(),
+            set_upstream: true,
+            force: false,
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        assert_eq!(
+            git_out(d, &["rev-parse", "--abbrev-ref", "main@{upstream}"]).trim(),
+            "origin/main"
+        );
     }
 
     #[test]

@@ -54,6 +54,7 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | **Settings** | `Ctrl + ,`: ธีม, ขนาดตัวอักษร terminal, editor ที่ใช้, agent เริ่มต้น, auto-fetch, ชื่อ/อีเมลผู้เขียนของ repo นี้ |
 | **แก้ไฟล์เร็ว ๆ / หน้าต่างเดียว** | ปุ่ม **Edit** ที่หัว diff แก้ไฟล์ได้ในโปรแกรม (`⌘S` บันทึก) หรือ ↗ เปิดใน editor ที่บรรทัดที่แก้ · สั่ง `foxgit <โฟลเดอร์>` ตอนที่เปิดโปรแกรมอยู่แล้วจะเปิดเป็นแท็บในหน้าต่างเดิม ลากโฟลเดอร์มาวางที่หน้าต่างก็ได้ · แจ้งเตือนของระบบเมื่อ agent ทำงานเสร็จหรือ push/pull เสร็จตอนที่อยู่หน้าต่างอื่น |
 | **AI agents (แชตสั่งงาน)** | แถบซ้ายสุด ✨ **Agents → New chat** พิมพ์งานแล้วเลือก **Claude Code / Codex / Hermes** (ตัวที่ลงไว้ในเครื่อง) agent ทำงานในสำเนาแยก (git worktree, branch `agent/…`) ไม่แตะโฟลเดอร์ของคุณ เห็นความคืบหน้าสด พิมพ์คุยต่อได้ตลอด (ระหว่างทำงานข้อความจะเข้าคิว) เสร็จแล้วกด **Review changes** เพื่อคัดเก็บทีละ hunk/บรรทัด แล้ว **Merge** หรือ **Discard** แต่ละแชตมีแท็บ **Terminal** (terminal จริงในสำเนาของ agent กด "Continue in Claude Code" เพื่อเปิด agent แบบเต็มจอต่อ session เดิม), ปุ่ม **Open in Cursor / VS Code / Zed**, **Open in Terminal app** และ **Push & PR** |
+| **Agents แบบ workspace** | แต่ละแชตมี 3 แท็บ: **Chat**, **Changes** (ดู diff ทุกไฟล์ที่ agent แก้ เลือกบรรทัดแล้วเขียนคอมเมนต์ ส่งกลับให้ agent แก้ทีเดียว) และ **Terminal** (หลาย terminal ในสำเนาของ agent: หน้าจอเต็มของ agent, shell, script ของโปรเจกต์ + ปุ่มเปิดเบราว์เซอร์) · New chat เลือกโหมด Chat/Terminal, **model**, **profile**, **Plan first** และสั่ง **หลาย agent / หลายรอบพร้อมกัน** แล้วเทียบผลบน **Board** · ช่องพิมพ์มีปุ่มคำสั่งสำเร็จรูป (Write tests, Review yourself, Explain … เพิ่มเองได้ใน Settings), **📎 แนบไฟล์ (@)**, เปลี่ยน model, Plan mode · เมนู ⋯: Rename, Retry with another agent, Update from base, Run tests · **Profiles** แยกบัญชี/ค่าตั้งของ Claude Code / Codex / Hermes |
 | **ตั้ง remote ทีหลัง** | repo ที่สร้างในเครื่อง (`git init`) กด **Add remote…** ใน sidebar แล้วใส่ URL หรือเลือก **Create on GitHub** ให้สร้าง repo บน GitHub แล้วผูก + push ให้ในขั้นตอนเดียว คลิกขวาที่ remote เพื่อแก้ชื่อ/URL หรือลบ |
 | **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
 | **บัญชี GitHub (หลาย account)** | กด **Sign in** แล้ววาง Personal Access Token (มีลิงก์สร้าง token ที่ติ๊กสิทธิ์ให้แล้ว) เก็บใน Keychain ของระบบ เพิ่มได้หลาย account และสลับได้จากเมนู account ที่ toolbar push/pull ไป github.com ไม่ต้องใส่รหัสอีก repo ที่ clone จาก account ไหนจะใช้ token ของ account นั้นเสมอ (เปลี่ยนได้ที่คลิกขวา remote → GitHub account) |
@@ -124,7 +125,9 @@ src/
 ├── palette.rs     Command palette
 ├── editor.rs      แก้ไฟล์เร็ว ๆ ในโปรแกรม
 ├── aicommit.rs    ✨ เขียน commit message ด้วย Claude Code
-├── agents.rs      แชต AI agent (Claude Code / Codex / Hermes) ใน git worktree
+├── agents.rs      แชต AI agent (Claude Code / Codex / Hermes) ใน git worktree, Board, New chat
+├── agent_review.rs แท็บ Changes ของแชต agent (diff + คอมเมนต์ส่งให้ agent)
+├── prompts.rs     คำสั่งสำเร็จรูป, model, profiles ของ agent
 ├── terminal.rs    terminal ในตัว (PTY + vt100)
 ├── desktop.rs     หา editor / terminal app, แจ้งเตือนของระบบ
 ├── instance.rs    โหมดหน้าต่างเดียว (ส่งโฟลเดอร์ให้หน้าต่างที่เปิดอยู่)

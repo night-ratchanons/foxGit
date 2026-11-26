@@ -237,6 +237,33 @@ impl FoxGitApp {
                     self.palette.open(items);
                 }
                 "settings" => self.settings.open = true,
+                "agentsfake" => {
+                    let (p, n) = (self.tabs[i].path.clone(), self.tabs[i].name.clone());
+                    let base = self.tabs[i]
+                        .refs
+                        .head_name
+                        .clone()
+                        .unwrap_or_else(|| "main".into());
+                    self.tabs[i].view = View::Agents;
+                    self.tabs[i].agent_chat = self.agents.demo_fill(&p, &n, &base, arg);
+                }
+                "newchat" => {
+                    self.agents.demo_mode(arg == "terminal");
+                    self.tabs[i].view = View::Agents;
+                    let (p, n) = (self.tabs[i].path.clone(), self.tabs[i].name.clone());
+                    let base = self.tabs[i]
+                        .refs
+                        .head_name
+                        .clone()
+                        .unwrap_or_else(|| "HEAD".into());
+                    self.agents.open_new(&p, &n, &base, "");
+                    if arg == "terminal-start" {
+                        self.agents.demo_mode(true);
+                        self.agents.open_new(&p, &n, &base, "");
+                        self.agents.start_new();
+                    }
+                }
+                "push" => self.dialog = Some(super::push_dialog_for(&self.tabs[i])),
                 "edit" => {
                     self.tabs[i].edit =
                         crate::editor::EditState::open(&self.tabs[i].path, arg).ok();

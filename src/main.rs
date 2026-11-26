@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows release builds
 
 mod account;
+mod agent_review;
 mod agents;
 mod aicommit;
 mod app;
@@ -16,6 +17,7 @@ mod graph;
 mod hub;
 mod instance;
 mod palette;
+mod prompts;
 mod runner;
 mod search;
 mod shellenv;

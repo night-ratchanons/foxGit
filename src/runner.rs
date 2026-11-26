@@ -175,9 +175,22 @@ pub struct RunPanel {
     sessions: Vec<Session>,
     active: usize,
     tasks: Option<(Instant, PathBuf, Vec<Task>)>,
+    /// Extra environment for every new shell (an agent profile's config dir).
+    pub envs: Vec<(String, String)>,
+    /// Embedded somewhere that can't be hidden (an agent's Terminal tab): no Hide button.
+    pub fixed: bool,
 }
 
 impl RunPanel {
+    /// A panel embedded in a page (no Hide button), with extra environment for its shells.
+    pub fn embedded(envs: Vec<(String, String)>) -> Self {
+        RunPanel {
+            fixed: true,
+            envs,
+            ..Default::default()
+        }
+    }
+
     /// Detected tasks (re-scanned at most every 10 s).
     pub fn tasks(&mut self, dir: &Path) -> Vec<Task> {
         let fresh = self
@@ -219,7 +232,7 @@ impl RunPanel {
                 return Ok(());
             }
         }
-        let mut term = Terminal::spawn(dir, ctx)?;
+        let mut term = Terminal::spawn_with_env(dir, ctx, &self.envs)?;
         if let Some(cmd) = command {
             term.run_line(cmd);
         }
@@ -233,6 +246,38 @@ impl RunPanel {
         self.active = self.sessions.len() - 1;
         self.open = true;
         Ok(())
+    }
+
+    /// Switch to the live session called `title`, or start one running `command`.
+    pub fn focus_or_start(
+        &mut self,
+        dir: &Path,
+        ctx: &egui::Context,
+        title: &str,
+        command: &str,
+    ) -> Result<(), String> {
+        if let Some(i) = self
+            .sessions
+            .iter()
+            .position(|s| s.title == title && !s.term.exited())
+        {
+            self.active = i;
+            return Ok(());
+        }
+        // a finished session of the same name makes way for the new one
+        self.sessions
+            .retain(|s| !(s.title == title && s.term.exited()));
+        self.active = self.active.min(self.sessions.len().saturating_sub(1));
+        self.start(dir, ctx, title, Some(command))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.sessions.is_empty()
+    }
+
+    /// Text on the screen of the active session.
+    pub fn active_contents(&self) -> Option<String> {
+        self.sessions.get(self.active).map(|s| s.term.contents())
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, dir: &Path) {
@@ -298,10 +343,11 @@ impl RunPanel {
                 }
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .small_button("Hide")
-                    .on_hover_text("Hide the panel (terminals keep running)")
-                    .clicked()
+                if !self.fixed
+                    && ui
+                        .small_button("Hide")
+                        .on_hover_text("Hide the panel (terminals keep running)")
+                        .clicked()
                 {
                     self.open = false;
                 }

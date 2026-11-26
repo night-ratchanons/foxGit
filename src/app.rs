@@ -374,7 +374,10 @@ pub enum Dialog {
     },
     Push {
         remote: String,
-        branch: String,
+        /// Local branch to push.
+        local: String,
+        /// Branch on the remote (existing or new).
+        remote_branch: String,
         set_upstream: bool,
         force: bool,
     },
@@ -494,6 +497,13 @@ struct Saved {
     editor: Option<String>,
     #[serde(default)]
     terminal_font: Option<f32>,
+    /// New agent chats start in Chat or Terminal mode.
+    #[serde(default)]
+    agent_mode: agents::StartMode,
+    #[serde(default)]
+    agent_profiles: Vec<crate::prompts::Profile>,
+    #[serde(default)]
+    snippets: Vec<crate::prompts::Snippet>,
 }
 
 /// Result of looking for `git` at startup.
@@ -664,7 +674,13 @@ impl FoxGitApp {
             last_update_check: saved.last_update_check,
             publish: None,
             next_tag: 1,
-            agents: agents::Agents::new(&cc.egui_ctx, saved.agent_tasks.clone(), saved.last_agent),
+            agents: agents::Agents::new(
+                &cc.egui_ctx,
+                saved.agent_tasks.clone(),
+                saved.last_agent,
+                saved.agent_profiles.clone(),
+                saved.snippets.clone(),
+            ),
             hub: hub::Hub::new(&cc.egui_ctx),
             palette: Default::default(),
             settings: Default::default(),
@@ -677,6 +693,7 @@ impl FoxGitApp {
             demo_token: false,
         };
         crate::desktop::set_preferred_editor(app.editor_pref.clone());
+        app.agents.last_mode = saved.agent_mode;
         crate::terminal::set_font_size(app.term_font);
         app.apply_theme(&cc.egui_ctx);
         app.start_git_check(&cc.egui_ctx);
@@ -1172,6 +1189,26 @@ impl FoxGitApp {
                     }
                 }
                 agents::TaskAction::Notify(text, ok) => self.notify(text, ok),
+                agents::TaskAction::Sync {
+                    repo,
+                    worktree,
+                    base,
+                } => {
+                    let tab_id = self.tabs.iter().find(|t| t.path == repo).map(|t| t.id);
+                    self.enqueue(
+                        tab_id,
+                        repo,
+                        JobKind::Op(Op::AgentSync {
+                            worktree: worktree.display().to_string(),
+                            base,
+                        }),
+                    );
+                }
+                agents::TaskAction::Board => {
+                    if let Some(t) = self.tabs.get_mut(self.active) {
+                        t.agent_chat = None;
+                    }
+                }
                 agents::TaskAction::PushPr {
                     repo,
                     worktree,
@@ -2471,22 +2508,108 @@ impl FoxGitApp {
                     }
                     Dialog::Push {
                         remote,
-                        branch,
+                        local,
+                        remote_branch,
                         set_upstream,
                         force,
                     } => {
-                        ui.horizontal(|ui| {
-                            ui.label("Remote:");
-                            ui.text_edit_singleline(remote);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Branch:");
-                            ui.text_edit_singleline(branch);
-                        });
-                        ui.checkbox(set_upstream, "Set upstream (track remote branch)");
+                        let Some(tab) = self.tabs.get(self.active) else {
+                            return;
+                        };
+                        let p = theme::pal(ui);
+                        let mut changed = false;
+                        egui::Grid::new("push_grid")
+                            .num_columns(2)
+                            .spacing([10.0, 8.0])
+                            .show(ui, |ui| {
+                                ui.label("Push branch:");
+                                egui::ComboBox::from_id_salt("push_local")
+                                    .selected_text(local.as_str())
+                                    .width(280.0)
+                                    .show_ui(ui, |ui| {
+                                        for b in &tab.refs.locals {
+                                            let label = if b.is_head {
+                                                format!("{}  (current)", b.name)
+                                            } else {
+                                                b.name.clone()
+                                            };
+                                            if ui.selectable_value(local, b.name.clone(), label).clicked() {
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.end_row();
+                                ui.label("To remote:");
+                                egui::ComboBox::from_id_salt("push_remote")
+                                    .selected_text(remote.as_str())
+                                    .width(280.0)
+                                    .show_ui(ui, |ui| {
+                                        for r in &tab.refs.remote_names {
+                                            if ui.selectable_value(remote, r.clone(), r).clicked() {
+                                                changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.end_row();
+                                ui.label("Remote branch:");
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::TextEdit::singleline(remote_branch).desired_width(244.0));
+                                    let pick = ui.button("▾").on_hover_text("Pick a branch on the remote");
+                                    egui::Popup::menu(&pick).show(|ui| {
+                                        ui.set_min_width(260.0);
+                                        let on_remote: Vec<&git::RemoteBranch> = tab
+                                            .refs
+                                            .remotes
+                                            .iter()
+                                            .filter(|rb| &rb.remote == remote && rb.branch != "HEAD")
+                                            .collect();
+                                        if on_remote.is_empty() {
+                                            ui.label(RichText::new("No branches fetched from this remote yet").weak());
+                                        }
+                                        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                                            for rb in on_remote {
+                                                if ui.selectable_label(*remote_branch == rb.branch, &rb.branch).clicked() {
+                                                    *remote_branch = rb.branch.clone();
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.end_row();
+                            });
+                        if changed {
+                            let (rb, up) = push_target(tab, local, remote);
+                            *remote_branch = rb;
+                            *set_upstream = up;
+                        }
+                        let rb = remote_branch.trim();
+                        let exists = tab.refs.remotes.iter().any(|x| &x.remote == remote && x.branch == rb);
+                        if !rb.is_empty() {
+                            ui.label(
+                                RichText::new(if exists {
+                                    format!("{local} → {remote}/{rb}")
+                                } else {
+                                    format!("{local} → {remote}/{rb}  (new branch on the remote)")
+                                })
+                                .small()
+                                .color(if exists { p.subtext } else { p.green }),
+                            );
+                        }
+                        if tab.refs.remote_names.is_empty() {
+                            ui.label(
+                                RichText::new("This repository has no remote yet — Repository → Add remote…")
+                                    .color(p.yellow),
+                            );
+                        }
+                        ui.add_space(4.0);
+                        ui.checkbox(set_upstream, "Track this remote branch (set upstream)");
                         ui.checkbox(force, "Force push (--force-with-lease)");
                         ok_label = "Push";
-                        ok_enabled = !remote.trim().is_empty() && !branch.trim().is_empty();
+                        ok_enabled = tab.refs.remote_names.iter().any(|r| r == remote)
+                            && !local.trim().is_empty()
+                            && !rb.is_empty()
+                            && !rb.contains(char::is_whitespace);
                     }
                     Dialog::Pull { rebase } => {
                         ui.label("Pull from the tracked remote branch.");
@@ -2696,16 +2819,16 @@ impl FoxGitApp {
                             }
                             Dialog::Push {
                                 remote,
-                                branch,
+                                local,
+                                remote_branch,
                                 set_upstream,
                                 force,
                             } => {
-                                run = Some(Op::Push {
-                                    set_upstream: if *set_upstream {
-                                        Some((remote.trim().into(), branch.trim().into()))
-                                    } else {
-                                        None
-                                    },
+                                run = Some(Op::PushTo {
+                                    remote: remote.trim().into(),
+                                    local: local.trim().into(),
+                                    remote_branch: remote_branch.trim().into(),
+                                    set_upstream: *set_upstream,
                                     force: *force,
                                 })
                             }
@@ -3195,9 +3318,20 @@ impl eframe::App for FoxGitApp {
                         self.apply_agent_actions(acts);
                     }
                     None => {
-                        if self.agents.empty_view(ui) {
-                            actions.push(Action::NewAgentTask(String::new()));
+                        let repo = tab.path.clone();
+                        let mut acts = Vec::new();
+                        for a in self.agents.board(ui, &repo) {
+                            match a {
+                                agents::BoardAction::New => {
+                                    actions.push(Action::NewAgentTask(String::new()))
+                                }
+                                agents::BoardAction::Open(id) => {
+                                    self.tabs[active].agent_chat = Some(id)
+                                }
+                                agents::BoardAction::Act(x) => acts.push(x),
+                            }
                         }
+                        self.apply_agent_actions(acts);
                     }
                 },
             }
@@ -3206,7 +3340,9 @@ impl eframe::App for FoxGitApp {
         if let Some((repo, id)) = self.agents.opened.take() {
             if let Some(i) = self.tabs.iter().position(|t| t.path == repo) {
                 self.tabs[i].view = View::Agents;
-                self.tabs[i].agent_chat = Some(id);
+                // several runs at once: the board shows them side by side
+                self.tabs[i].agent_chat =
+                    (!std::mem::take(&mut self.agents.show_board)).then_some(id);
                 self.select_tab(i);
             }
         }
@@ -3255,6 +3391,9 @@ impl eframe::App for FoxGitApp {
             last_agent: Some(self.agents.last_kind),
             editor: self.editor_pref.clone(),
             terminal_font: Some(self.term_font),
+            agent_mode: self.agents.last_mode,
+            agent_profiles: self.agents.profiles.clone(),
+            snippets: self.agents.snippets.clone(),
         };
         eframe::set_value(storage, STORAGE_KEY, &saved);
     }
@@ -3312,24 +3451,57 @@ fn toolbar_divider(ui: &mut egui::Ui) {
 }
 
 pub fn push_dialog_for(tab: &RepoTab) -> Dialog {
-    let head = tab.head_branch();
-    let branch = head.map(|b| b.name.clone()).unwrap_or_default();
-    let (remote, set_upstream) = match head.and_then(|b| b.upstream.clone()) {
-        Some(up) => (up.split('/').next().unwrap_or("origin").to_string(), false),
-        None => (
+    let local = tab
+        .head_branch()
+        .map(|b| b.name.clone())
+        .unwrap_or_default();
+    let remote = tab
+        .head_branch()
+        .and_then(|b| b.upstream.as_deref())
+        .and_then(|u| upstream_remote(&tab.refs.remote_names, u))
+        .or_else(|| {
             tab.refs
                 .remote_names
-                .first()
+                .iter()
+                .find(|r| *r == "origin")
                 .cloned()
-                .unwrap_or_else(|| "origin".into()),
-            true,
-        ),
-    };
+        })
+        .or_else(|| tab.refs.remote_names.first().cloned())
+        .unwrap_or_else(|| "origin".into());
+    let (remote_branch, set_upstream) = push_target(tab, &local, &remote);
     Dialog::Push {
         remote,
-        branch,
+        local,
+        remote_branch,
         set_upstream,
         force: false,
+    }
+}
+
+/// The remote of an upstream like `origin/feature/x` (remote names may contain `/`).
+fn upstream_remote(remotes: &[String], upstream: &str) -> Option<String> {
+    remotes
+        .iter()
+        .filter(|r| upstream.starts_with(&format!("{r}/")))
+        .max_by_key(|r| r.len())
+        .cloned()
+}
+
+/// Default remote branch for pushing `local` to `remote`: its upstream there, else the same
+/// name; and whether to set the upstream (only when the branch has none yet).
+fn push_target(tab: &RepoTab, local: &str, remote: &str) -> (String, bool) {
+    let up = tab
+        .refs
+        .locals
+        .iter()
+        .find(|b| b.name == local)
+        .and_then(|b| b.upstream.clone());
+    match up {
+        Some(u) => match u.strip_prefix(&format!("{remote}/")) {
+            Some(rb) => (rb.to_string(), false),
+            None => (local.to_string(), false),
+        },
+        None => (local.to_string(), true),
     }
 }
 

@@ -62,7 +62,17 @@ fn default_shell() -> CommandBuilder {
 
 impl Terminal {
     /// Start the user's shell in `cwd`.
+    #[cfg(test)]
     pub fn spawn(cwd: &Path, ctx: &egui::Context) -> Result<Self, String> {
+        Self::spawn_with_env(cwd, ctx, &[])
+    }
+
+    /// Start the shell with extra environment variables (e.g. an agent profile's config dir).
+    pub fn spawn_with_env(
+        cwd: &Path,
+        ctx: &egui::Context,
+        envs: &[(String, String)],
+    ) -> Result<Self, String> {
         let pty = native_pty_system();
         let size = PtySize {
             rows: 24,
@@ -78,6 +88,9 @@ impl Terminal {
         cmd.env("TERM_PROGRAM", "FoxGit");
         if let Some(p) = shellenv::path() {
             cmd.env("PATH", p);
+        }
+        for (k, v) in envs {
+            cmd.env(k, v);
         }
         let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
         drop(pair.slave);
