@@ -1,6 +1,6 @@
-# RustTree — project guide for Claude Code
+# FoxGit — project guide for Claude Code
 
-A fast Sourcetree-style Git GUI written in Rust. The user speaks Thai — reply in Thai; keep code, identifiers and UI strings in English.
+A fast Sourcetree-style Git GUI written in Rust (formerly "RustTree": `main::migrate_storage` and `github::load_token` carry old saved state / keychain tokens over; `STORAGE_KEY` keeps its old value on purpose). The user speaks Thai — reply in Thai; keep code, identifiers and UI strings in English.
 
 ## Commands
 
@@ -9,6 +9,10 @@ cargo run --release -- ~/path/to/repo [more repos…]   # run (each path opens a
 cargo test                                            # unit + integration tests (create temp git repos)
 cargo clippy && cargo fmt                             # keep both clean before finishing a task
 RT_BENCH=/path/to/big/repo cargo test --release bench_load -- --ignored --nocapture   # history load benchmark
+scripts/bundle-macos.sh [--universal] [--dmg]         # build target/release/FoxGit.app (+ .dmg)
+scripts/make-icons.sh                                 # re-render assets/icon/* (.png/.icns/.ico) from foxgit.svg (needs resvg)
+scripts/demo-repos.sh                                 # throw-away demo repos in /tmp (screenshots / manual testing)
+python3 scripts/third-party-licenses.py > THIRD-PARTY-LICENSES.txt   # after dependency changes
 ```
 
 Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 is vendored).
@@ -18,7 +22,7 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 | File | Responsibility |
 |---|---|
 | `src/main.rs` | Entry point. First checks `askpass::client_main()` (process started by git as GIT_ASKPASS) before opening any window. |
-| `src/app.rs` | `RustTreeApp` state, `RepoTab` (one per open repo), toolbar, dialogs, background job queue, shortcuts, auto-fetch, credential dialog, persistence (`Saved`). |
+| `src/app.rs` | `FoxGitApp` state, `RepoTab` (one per open repo), toolbar, dialogs, background job queue, shortcuts, auto-fetch, credential dialog, persistence (`Saved`). |
 | `src/tabs.rs` | Browser-style tab strip (drag reorder, context menu), Projects launcher page, project list (`Project`, pinned/recent), repo scanner. |
 | `src/views.rs` | Sidebar (branches/remotes/tags/stashes), History view (commit list + graph painting), File Status view (staged/unstaged lists, commit box). |
 | `src/diffview.rs` | Virtualized diff viewer + hunk/line staging UI. |
@@ -29,6 +33,10 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 | `src/branchtree.rs` | Groups branch names into folders by `/` prefix for the sidebar (pure, unit-tested). |
 | `src/github.rs` | GitHub backend: device flow + PAT sign-in, `/user/repos` listing, keychain storage (`keyring`), and `git_credential()` — URL-scoped `-c credential.https://github.com.helper` args injected by `run_git_ext`. |
 | `src/account.rs` | GitHub UI: sign-in modal, toolbar account menu, the Projects page "Remote" list with Clone/Open. |
+| `src/shellenv.rs` | Login-shell `PATH` for git child processes (apps started from Finder get a minimal PATH) + `git --version` check. |
+| `src/update.rs` | Update check against GitHub Releases of `FOXGIT_REPO` / `GITHUB_REPOSITORY` (set automatically in CI builds; dev builds don't check). |
+
+Release: `.github/workflows/release.yml` builds macOS (universal .dmg), Windows (.zip, icon via `build.rs`), Linux (.tar.gz + .deb) on a `v*` tag and makes a draft GitHub Release from the `CHANGELOG.md` section. See `docs/RELEASING.md`. CI (`ci.yml`) runs fmt, `clippy -D warnings` and tests on all three OSes.
 
 ### Key conventions
 
@@ -38,6 +46,8 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 - **Destructive actions always confirm** (discard, delete branch/tag, reset --hard, drop stash).
 - **Never block the UI thread** on network or long work. History loads on a thread (`RepoTab::start_history_load`); network ops go through the job queue or the auto-fetch thread.
 - Lists and diffs are virtualized with `ScrollArea::show_rows`; keep row heights uniform.
+- Shortcut labels go through `theme::shortcut("T")` (⌘ on macOS, Ctrl elsewhere).
+- Screenshots in `docs/screenshots/` come from `scripts/demo-repos.sh` — never from real projects.
 - egui 0.37 API notes: `App::ui(&mut self, ui, frame)` + `App::logic`; panels are `egui::Panel::left/right/top/bottom(id).show(ui, …)` and `CentralPanel::default().show(ui, …)`; use `Id::unique` (not `Id::new`) and `ui.scope_id()` (not `ui.id()`); git2 0.21 string getters return `Result`, not `Option`.
 - Fonts: eframe `system_fonts` feature handles Thai/CJK fallback; `egui/monochrome_emoji_fonts` provides icons. Not every Unicode symbol renders (e.g. `⑂` shows as a box on macOS — use `theme::BRANCH` = `⎇`), so check new icons on screen.
 - Theme: `theme::apply` sets the theme preference explicitly; never use `ctx.set_visuals` (egui follows the OS appearance and would drop it).
@@ -51,17 +61,17 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 ## Roadmap (agreed next steps)
 
 1. Conflict resolution view: list conflicted files, "use ours / use theirs", open in external merge tool (`git mergetool`), mark resolved, continue/abort merge or rebase.
-2. Single-instance mode + "Open in RustTree" (open a folder as a tab in the running window).
+2. Single-instance mode + "Open in FoxGit" (open a folder as a tab in the running window; also Finder "Open With" / dock drop).
 3. File watcher (`notify` crate) to refresh status on save.
 4. Multi-select files (Shift/Ctrl+click) for stage/discard.
 5. File history + blame.
 6. Interactive rebase (reorder / squash / reword).
 7. Diff improvements: syntax highlighting, side-by-side, word-level highlight.
-8. Settings page (per-repo user.name/email, remotes, external tools) and release packaging (.app / .dmg, GitHub Actions).
+8. Settings page (per-repo user.name/email, remotes, external tools). Packaging/CI is done; still open: Windows code signing, an installer (MSI), Linux AppImage / arm64.
 
 ## Known limits
 
 - Hunk/line staging only for modified files (new/deleted/conflicted files are staged whole).
 - Credentials ticked "Remember" are kept in memory only, for the session. The GitHub account token is the exception: it lives in the OS keychain (only the login is saved in app state).
-- GitHub browser sign-in needs an OAuth App client ID (entered in the sign-in dialog or baked in with `RUSTTREE_GITHUB_CLIENT_ID=… cargo build`); a personal access token works without one.
+- GitHub browser sign-in needs an OAuth App client ID (entered in the sign-in dialog or baked in with `FOXGIT_GITHUB_CLIENT_ID=… cargo build`); a personal access token works without one.
 - Bare repositories are not supported.

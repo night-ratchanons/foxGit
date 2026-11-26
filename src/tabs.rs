@@ -241,7 +241,10 @@ pub fn tab_strip(ui: &mut egui::Ui, tabs: &[TabInfo], st: StripState<'_>) -> Vec
 
                     let is_pinned = pinned(&t.path);
                     r.resp.context_menu(|ui| {
-                        if ui.button("Close tab        Ctrl+W").clicked() {
+                        if ui
+                            .button(format!("Close tab        {}", theme::shortcut("W")))
+                            .clicked()
+                        {
                             events.push(TabEvent::Close(i));
                             ui.close();
                         }
@@ -305,7 +308,7 @@ pub fn tab_strip(ui: &mut egui::Ui, tabs: &[TabInfo], st: StripState<'_>) -> Vec
                             tip.push_str(&format!("\nFetched {f}"));
                         }
                         if i < 9 {
-                            tip.push_str(&format!("\nCtrl+{}", i + 1));
+                            tip.push_str(&format!("\n{}", theme::shortcut(&(i + 1).to_string())));
                         }
                         r.resp.on_hover_text(tip);
                     }
@@ -347,7 +350,10 @@ pub fn tab_strip(ui: &mut egui::Ui, tabs: &[TabInfo], st: StripState<'_>) -> Vec
                         ui.visuals().weak_text_color()
                     },
                 );
-                if resp.on_hover_text("Open project  (Ctrl+T)").clicked() {
+                if resp
+                    .on_hover_text(format!("Open project  ({})", theme::shortcut("T")))
+                    .clicked()
+                {
                     events.push(TabEvent::OpenLauncher);
                 }
             });

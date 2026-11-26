@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FoxGit
+GenericName=Git Client
+Comment=A fast, friendly Git client
+Exec=foxgit %F
+Icon=foxgit
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;version control;repository;commit;
+StartupWMClass=FoxGit

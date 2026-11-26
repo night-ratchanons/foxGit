@@ -2,7 +2,7 @@
 //!
 //! When git or ssh needs a username, password, token or key passphrase, it runs the program in
 //! `GIT_ASKPASS` / `SSH_ASKPASS` with the prompt as its argument and reads the answer from stdout.
-//! We point both at our own executable. Started that way, RustTree does not open a window: it
+//! We point both at our own executable. Started that way, FoxGit does not open a window: it
 //! connects to the running app over a localhost socket (protected by a random token), the app
 //! shows a dialog, and the answer is printed back to git.
 
@@ -12,9 +12,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-const ENV_PORT: &str = "RUSTTREE_ASKPASS_PORT";
-const ENV_TOKEN: &str = "RUSTTREE_ASKPASS_TOKEN";
-const ENV_MODE: &str = "RUSTTREE_ASKPASS_MODE";
+const ENV_PORT: &str = "FOXGIT_ASKPASS_PORT";
+const ENV_TOKEN: &str = "FOXGIT_ASKPASS_TOKEN";
+const ENV_MODE: &str = "FOXGIT_ASKPASS_MODE";
 
 struct Server {
     exe: String,

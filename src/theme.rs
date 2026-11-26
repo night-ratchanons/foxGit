@@ -479,5 +479,14 @@ pub fn paint_avatar(painter: &egui::Painter, center: egui::Pos2, radius: f32, na
     );
 }
 
+/// Label for a Cmd (macOS) / Ctrl (elsewhere) shortcut, e.g. `shortcut("T")` → "⌘T" or "Ctrl+T".
+pub fn shortcut(key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("⌘{key}")
+    } else {
+        format!("Ctrl+{key}")
+    }
+}
+
 /// Branch glyph that exists in egui's bundled icon font (U+2442 "⑂" does not render on macOS).
 pub const BRANCH: &str = "⎇";

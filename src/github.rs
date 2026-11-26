@@ -9,14 +9,16 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 const API: &str = "https://api.github.com";
-const KEYCHAIN_SERVICE: &str = "RustTree GitHub";
+const KEYCHAIN_SERVICE: &str = "FoxGit GitHub";
+/// Where tokens were kept before the app was renamed (moved over on first read).
+const LEGACY_KEYCHAIN_SERVICE: &str = "RustTree GitHub";
 /// `repo` for private repositories, `read:org` to see organization repositories,
 /// `workflow` so pushes that touch `.github/workflows` are accepted.
 pub const SCOPES: &str = "repo read:org workflow";
-/// OAuth App client ID baked in at build time (`RUSTTREE_GITHUB_CLIENT_ID=… cargo build`).
-pub const BUILTIN_CLIENT_ID: Option<&str> = option_env!("RUSTTREE_GITHUB_CLIENT_ID");
+/// OAuth App client ID baked in at build time (`FOXGIT_GITHUB_CLIENT_ID=… cargo build`).
+pub const BUILTIN_CLIENT_ID: Option<&str> = option_env!("FOXGIT_GITHUB_CLIENT_ID");
 pub const NEW_TOKEN_URL: &str =
-    "https://github.com/settings/tokens/new?scopes=repo,read:org,workflow&description=RustTree";
+    "https://github.com/settings/tokens/new?scopes=repo,read:org,workflow&description=FoxGit";
 pub const NEW_OAUTH_APP_URL: &str = "https://github.com/settings/applications/new";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -80,7 +82,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(30)))
         .http_status_as_error(false)
-        .user_agent("RustTree")
+        .user_agent("FoxGit")
         .build()
         .into()
 }
@@ -222,9 +224,24 @@ pub fn save_token(login: &str, token: &str) -> Result<(), String> {
 }
 
 pub fn load_token(login: &str) -> Result<String, String> {
-    keyring::Entry::new(KEYCHAIN_SERVICE, login)
-        .and_then(|e| e.get_password())
-        .map_err(|e| e.to_string())
+    let current = keyring::Entry::new(KEYCHAIN_SERVICE, login).and_then(|e| e.get_password());
+    match current {
+        Ok(t) => Ok(t),
+        Err(err) => {
+            // Signed in before the rename? Move the token to the new keychain entry.
+            let legacy = keyring::Entry::new(LEGACY_KEYCHAIN_SERVICE, login)
+                .and_then(|e| e.get_password().map(|t| (e, t)));
+            match legacy {
+                Ok((old, t)) => {
+                    if save_token(login, &t).is_ok() {
+                        let _ = old.delete_credential();
+                    }
+                    Ok(t)
+                }
+                Err(_) => Err(err.to_string()),
+            }
+        }
+    }
 }
 
 pub fn delete_token(login: &str) {
@@ -238,8 +255,8 @@ pub fn delete_token(login: &str) {
 // ---------------------------------------------------------------------------
 
 static GIT_CREDENTIAL: Mutex<Option<(String, String)>> = Mutex::new(None);
-const ENV_USER: &str = "RUSTTREE_GH_USER";
-const ENV_TOKEN: &str = "RUSTTREE_GH_TOKEN";
+const ENV_USER: &str = "FOXGIT_GH_USER";
+const ENV_TOKEN: &str = "FOXGIT_GH_TOKEN";
 
 /// Use this account (login, token) for every HTTPS remote on github.com, or stop doing so.
 pub fn set_git_credential(cred: Option<(String, String)>) {

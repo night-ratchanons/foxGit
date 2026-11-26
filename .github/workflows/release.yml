@@ -1,0 +1,159 @@
+# Push a tag like v0.1.0 to build FoxGit for macOS, Windows and Linux and create a draft
+# GitHub Release with the downloads. Review the draft on GitHub, then press "Publish".
+#
+# Optional repository settings:
+#   Variable FOXGIT_GITHUB_CLIENT_ID   OAuth App client ID for "Sign in with GitHub"
+#   Secrets (macOS signing + notarization, needs an Apple Developer account):
+#     MACOS_CERTIFICATE            base64 of a "Developer ID Application" .p12
+#     MACOS_CERTIFICATE_PASSWORD   password of that .p12
+#     MACOS_SIGN_IDENTITY          e.g. "Developer ID Application: Name (TEAMID)"
+#     APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   for notarytool
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FOXGIT_GITHUB_CLIENT_ID: ${{ vars.FOXGIT_GITHUB_CLIENT_ID }}
+
+jobs:
+  version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Version from Cargo.toml (must match the tag)
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $VERSION"
+            exit 1
+          fi
+
+  macos:
+    needs: version
+    runs-on: macos-14
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Import signing certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        if: env.HAS_SIGNING_CERT == 'true'
+        run: |
+          KEYCHAIN=$RUNNER_TEMP/signing.keychain-db
+          PASS=$(openssl rand -hex 16)
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$PASS" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$PASS" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$PASS" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+      - name: Build FoxGit.app and .dmg
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: scripts/bundle-macos.sh --universal --dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: target/release/FoxGit-${{ needs.version.outputs.version }}-macos.dmg
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "FoxGit-${{ needs.version.outputs.version }}-windows-x64"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item target/release/foxgit.exe "dist/$name/FoxGit.exe"
+          Copy-Item LICENSE, THIRD-PARTY-LICENSES.txt, README.md "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  linux:
+    needs: version
+    # Oldest supported Ubuntu → the binary runs on older glibc versions too.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libxkbcommon-dev libgl1-mesa-dev libx11-dev \
+            libxcursor-dev libxrandr-dev libxi-dev libwayland-dev
+      - run: cargo build --release --locked
+      - name: Package .tar.gz
+        run: |
+          name=FoxGit-${{ needs.version.outputs.version }}-linux-x64
+          mkdir -p "dist/$name"
+          cp target/release/foxgit packaging/linux/foxgit.desktop packaging/linux/install.sh \
+            LICENSE THIRD-PARTY-LICENSES.txt README.md "dist/$name/"
+          cp assets/icon/foxgit-512.png "dist/$name/foxgit.png"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - name: Package .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build --output dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+
+  release:
+    needs: [version, macos, windows, linux]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums and release notes
+        run: |
+          cd artifacts && sha256sum * > SHA256SUMS.txt && cd ..
+          VERSION=${{ needs.version.outputs.version }}
+          awk -v v="$VERSION" '
+            $0 ~ "^## \\[" v "\\]" { on=1; next }
+            on && /^## \[/ { exit }
+            on { print }' CHANGELOG.md > notes.md
+          sed "s/<version>/$VERSION/g" packaging/release-notes-footer.md >> notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: FoxGit ${{ needs.version.outputs.version }}
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.version.outputs.version) }}
+          draft: true
+          body_path: notes.md
+          files: artifacts/*

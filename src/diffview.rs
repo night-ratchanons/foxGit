@@ -113,74 +113,87 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
 
     // ---------------------------------------------------------------- header
     let pl = crate::theme::pal(ui);
-    ui.horizontal(|ui| {
-        let (dir, name) = match path.rsplit_once('/') {
-            Some((d, n)) => (format!("{d}/"), n.to_string()),
-            None => (String::new(), path.clone()),
-        };
-        ui.spacing_mut().item_spacing.x = 0.0;
-        ui.label(RichText::new(dir).monospace().color(pl.faint));
-        ui.label(
-            RichText::new(name)
-                .monospace()
-                .strong()
-                .color(pl.text_strong),
-        );
-        ui.spacing_mut().item_spacing.x = 8.0;
-        ui.add_space(10.0);
-        if let Some(Ok(d)) = &tab.diff {
-            ui.label(
-                RichText::new(format!("+{}", d.added))
-                    .monospace()
-                    .color(pl.green),
-            );
-            ui.label(
-                RichText::new(format!("−{}", d.removed))
-                    .monospace()
-                    .color(pl.red),
-            );
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            match &target {
-                DiffTarget::Staged { path } => {
-                    if ui.button("Unstage file").clicked() {
-                        let unborn = tab.repo.is_head_unborn();
-                        actions.push(Action::Run(Op::Unstage {
-                            paths: vec![path.clone()],
-                            unborn,
-                        }));
-                    }
-                }
-                DiffTarget::Unstaged { path } => {
-                    if ui.button("Stage file").clicked() {
-                        actions.push(Action::Run(Op::Stage(vec![path.clone()])));
-                    }
-                    if let Some(f) = tab.status.unstaged.iter().find(|f| &f.path == path) {
-                        if f.kind != ChangeKind::Conflicted && ui.button("Discard file…").clicked()
-                        {
-                            let (t, u) = split_tracked(std::slice::from_ref(f));
-                            actions.push(Action::Dialog(discard_dialog(f, t, u)));
+    let (dir, name) = match path.rsplit_once('/') {
+        Some((d, n)) => (format!("{d}/"), n.to_string()),
+        None => (String::new(), path.clone()),
+    };
+    let counts = match &tab.diff {
+        Some(Ok(d)) => Some((d.added, d.removed)),
+        _ => None,
+    };
+    // Buttons and counts on the right never move; a long path is truncated instead of
+    // being drawn underneath them.
+    egui::containers::Sides::new()
+        .shrink_left()
+        .truncate()
+        .show(
+            ui,
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.label(RichText::new(dir).monospace().color(pl.faint));
+                ui.label(
+                    RichText::new(name)
+                        .monospace()
+                        .strong()
+                        .color(pl.text_strong),
+                )
+                .on_hover_text(&path);
+            },
+            |ui| {
+                match &target {
+                    DiffTarget::Staged { path } => {
+                        if ui.button("Unstage file").clicked() {
+                            let unborn = tab.repo.is_head_unborn();
+                            actions.push(Action::Run(Op::Unstage {
+                                paths: vec![path.clone()],
+                                unborn,
+                            }));
                         }
                     }
+                    DiffTarget::Unstaged { path } => {
+                        if ui.button("Stage file").clicked() {
+                            actions.push(Action::Run(Op::Stage(vec![path.clone()])));
+                        }
+                        if let Some(f) = tab.status.unstaged.iter().find(|f| &f.path == path) {
+                            if f.kind != ChangeKind::Conflicted
+                                && ui.button("Discard file…").clicked()
+                            {
+                                let (t, u) = split_tracked(std::slice::from_ref(f));
+                                actions.push(Action::Dialog(discard_dialog(f, t, u)));
+                            }
+                        }
+                    }
+                    DiffTarget::Commit { .. } => {}
                 }
-                DiffTarget::Commit { .. } => {}
-            }
-            ui.separator();
-            if ui.small_button("+").on_hover_text("More context").clicked() {
-                tab.context_lines = (tab.context_lines + 3).min(100);
-                tab.reload_diff();
-            }
-            ui.label(
-                RichText::new(format!("context {}", tab.context_lines))
-                    .weak()
-                    .small(),
-            );
-            if ui.small_button("−").on_hover_text("Less context").clicked() {
-                tab.context_lines = tab.context_lines.saturating_sub(3);
-                tab.reload_diff();
-            }
-        });
-    });
+                ui.separator();
+                if ui.small_button("+").on_hover_text("More context").clicked() {
+                    tab.context_lines = (tab.context_lines + 3).min(100);
+                    tab.reload_diff();
+                }
+                ui.label(
+                    RichText::new(format!("context {}", tab.context_lines))
+                        .weak()
+                        .small(),
+                );
+                if ui.small_button("−").on_hover_text("Less context").clicked() {
+                    tab.context_lines = tab.context_lines.saturating_sub(3);
+                    tab.reload_diff();
+                }
+                if let Some((added, removed)) = counts {
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(format!("−{removed}"))
+                            .monospace()
+                            .color(pl.red),
+                    );
+                    ui.label(
+                        RichText::new(format!("+{added}"))
+                            .monospace()
+                            .color(pl.green),
+                    );
+                }
+            },
+        );
 
     // Selection bar (line staging). Fixed height so the diff below never jumps
     // when the bar appears — the next click must land on the line under the pointer.
@@ -536,8 +549,8 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
 /// Select every changed line between `a` and `b` (inclusive).
 fn select_range(tab: &mut RepoTab, diff: &FileDiff, a: usize, b: usize) {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    for j in lo..=hi.min(diff.lines.len().saturating_sub(1)) {
-        if matches!(diff.lines[j].kind, LineKind::Added | LineKind::Removed) {
+    for (j, l) in diff.lines.iter().enumerate().take(hi + 1).skip(lo) {
+        if matches!(l.kind, LineKind::Added | LineKind::Removed) {
             tab.line_sel.insert(j);
         }
     }

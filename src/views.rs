@@ -650,8 +650,47 @@ const LANE_W: f32 = 14.0;
 const COL_HASH: f32 = 72.0;
 const COL_AUTHOR: f32 = 150.0;
 const COL_DATE: f32 = 140.0;
+const COL_GAP: f32 = 10.0;
+/// Description never gets narrower than this; Date hides first, then Author shrinks.
+const DESC_MIN: f32 = 140.0;
+
+/// History column widths the user dragged to (remembered across restarts).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct ColWidths {
+    /// `None` = fit the graph's lanes.
+    graph: Option<f32>,
+    date: f32,
+    author: f32,
+    hash: f32,
+}
+
+impl Default for ColWidths {
+    fn default() -> Self {
+        Self {
+            graph: None,
+            date: COL_DATE,
+            author: COL_AUTHOR,
+            hash: COL_HASH,
+        }
+    }
+}
+
+fn col_widths_id() -> egui::Id {
+    egui::Id::unique("history_column_widths")
+}
 
 pub fn history_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
+    // Show something useful right away: the newest commit, or the selected commit's own diff
+    // again when coming back from File Status (both views share the diff pane).
+    let reselect = match (&tab.selected_commit, &tab.diff_target) {
+        (None, _) => tab.commits.first().map(|c| c.oid),
+        (Some(oid), Some(DiffTarget::Staged { .. } | DiffTarget::Unstaged { .. })) => Some(*oid),
+        _ => None,
+    };
+    if let Some(oid) = reselect {
+        tab.select_commit(oid);
+    }
+
     // Commit details + diff (bottom)
     egui::Panel::bottom("commit_details")
         .resizable(true)
@@ -724,8 +763,13 @@ fn merge_banner(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>)
 
 fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
     let show_graph = tab.filtered.is_none();
-    let graph_w = if show_graph {
-        LANE_W * tab.graph_lanes as f32 + 10.0
+    let mut widths: ColWidths = ui
+        .ctx()
+        .data_mut(|d| d.get_persisted(col_widths_id()))
+        .unwrap_or_default();
+    let auto_graph = LANE_W * tab.graph_lanes as f32 + 10.0;
+    let mut graph_w = if show_graph {
+        widths.graph.unwrap_or(auto_graph)
     } else {
         16.0
     };
@@ -739,53 +783,34 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
     let more_row = usize::from(tab.filtered.is_none() && tab.commits.len() >= tab.commit_limit);
     let total = wip_rows + n_commits + more_row;
 
-    // Header
+    // Header with draggable column dividers
     let header_h = 22.0;
     let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), header_h), Sense::hover());
-    let cols = Columns::new(hrect, graph_w);
-    let painter = ui.painter();
     let pl = pal(ui);
+    if column_dividers(ui, hrect, show_graph, auto_graph, &mut widths) {
+        ui.ctx()
+            .data_mut(|d| d.insert_persisted(col_widths_id(), widths));
+        if show_graph {
+            graph_w = widths.graph.unwrap_or(auto_graph);
+        }
+    }
+    let cols = Columns::new(hrect, graph_w, &widths);
+    let painter = ui.painter();
     let weak = pl.faint;
     let font = FontId::proportional(11.5);
     painter.line_segment(
         [hrect.left_bottom(), hrect.right_bottom()],
         Stroke::new(1.0, pl.border),
     );
-    painter.text(
-        pos2(cols.graph.left() + 4.0, hrect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Graph",
-        font.clone(),
-        weak,
-    );
-    painter.text(
-        pos2(cols.desc.left(), hrect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Description",
-        font.clone(),
-        weak,
-    );
-    painter.text(
-        pos2(cols.date.left(), hrect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Date",
-        font.clone(),
-        weak,
-    );
-    painter.text(
-        pos2(cols.author.left(), hrect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Author",
-        font.clone(),
-        weak,
-    );
-    painter.text(
-        pos2(cols.hash.left(), hrect.center().y),
-        egui::Align2::LEFT_CENTER,
-        "Commit",
-        font,
-        weak,
-    );
+    for (rect, label) in [
+        (cols.graph.translate(vec2(4.0, 0.0)), "Graph"),
+        (cols.desc, "Description"),
+        (cols.date, "Date"),
+        (cols.author, "Author"),
+        (cols.hash, "Commit"),
+    ] {
+        clipped_text(ui, rect, label, font.clone(), weak);
+    }
     ui.add_space(2.0);
 
     // Keyboard navigation
@@ -844,7 +869,7 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         for row in range {
             let (rect, resp) =
                 ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
-            let cols = Columns::new(rect, graph_w);
+            let cols = Columns::new(rect, graph_w, &widths);
 
             if show_wip && row == 0 {
                 paint_wip_row(ui, rect, &cols, tab, &resp);
@@ -1103,24 +1128,37 @@ struct Columns {
 }
 
 impl Columns {
-    fn new(rect: Rect, graph_w: f32) -> Self {
-        let narrow = rect.width() < 900.0;
-        let author_w = if narrow { 110.0 } else { COL_AUTHOR };
-        let date_w = if narrow { 0.0 } else { COL_DATE };
+    fn new(rect: Rect, graph_w: f32, w: &ColWidths) -> Self {
+        // Too narrow? Hide Date first, then shrink Author.
+        let room = rect.width() - graph_w - 4.0 - DESC_MIN;
+        let mut date_w = w.date;
+        let mut author_w = w.author;
+        let hash_w = w.hash;
+        if date_w + author_w + hash_w + 3.0 * COL_GAP > room {
+            date_w = 0.0;
+        }
+        if author_w + hash_w + 2.0 * COL_GAP > room {
+            author_w = (room - hash_w - 2.0 * COL_GAP).max(60.0);
+        }
+        let (top, bottom) = (rect.top(), rect.bottom());
         let r = rect.right();
-        let hash = Rect::from_min_max(pos2(r - COL_HASH, rect.top()), pos2(r, rect.bottom()));
+        let hash = Rect::from_min_max(pos2(r - hash_w, top), pos2(r, bottom));
         let author = Rect::from_min_max(
-            pos2(hash.left() - author_w, rect.top()),
-            pos2(hash.left() - 8.0, rect.bottom()),
+            pos2(hash.left() - COL_GAP - author_w, top),
+            pos2(hash.left() - COL_GAP, bottom),
         );
-        let date = Rect::from_min_max(
-            pos2(author.left() - date_w, rect.top()),
-            pos2(author.left() - 8.0, rect.bottom()),
-        );
-        let graph = Rect::from_min_max(rect.min, pos2(rect.left() + graph_w, rect.bottom()));
+        let date = if date_w > 0.0 {
+            Rect::from_min_max(
+                pos2(author.left() - COL_GAP - date_w, top),
+                pos2(author.left() - COL_GAP, bottom),
+            )
+        } else {
+            Rect::from_min_max(pos2(author.left(), top), pos2(author.left(), bottom))
+        };
+        let graph = Rect::from_min_max(rect.min, pos2(rect.left() + graph_w, bottom));
         let desc = Rect::from_min_max(
-            pos2(graph.right() + 4.0, rect.top()),
-            pos2(date.left(), rect.bottom()),
+            pos2(graph.right() + 4.0, top),
+            pos2(date.left() - COL_GAP, bottom),
         );
         Self {
             graph,
@@ -1130,6 +1168,89 @@ impl Columns {
             hash,
         }
     }
+}
+
+/// Drag the dividers in the header to resize Graph / Date / Author / Commit (Description takes
+/// the rest); double-click a divider to reset that column. Returns true if a width changed.
+fn column_dividers(
+    ui: &mut egui::Ui,
+    hrect: Rect,
+    show_graph: bool,
+    auto_graph: f32,
+    w: &mut ColWidths,
+) -> bool {
+    #[derive(Clone, Copy)]
+    enum Col {
+        Graph,
+        Date,
+        Author,
+        Hash,
+    }
+    let graph_w = if show_graph {
+        w.graph.unwrap_or(auto_graph)
+    } else {
+        16.0
+    };
+    let cols = Columns::new(hrect, graph_w, w);
+    let mut dividers = Vec::new();
+    if show_graph {
+        dividers.push((Col::Graph, cols.graph.right() + 2.0));
+    }
+    if cols.date.width() > 0.0 {
+        dividers.push((Col::Date, cols.date.left() - COL_GAP / 2.0));
+    }
+    dividers.push((Col::Author, cols.author.left() - COL_GAP / 2.0));
+    dividers.push((Col::Hash, cols.hash.left() - COL_GAP / 2.0));
+
+    let p = pal(ui);
+    let mut changed = false;
+    for (i, (col, x)) in dividers.into_iter().enumerate() {
+        let hit = Rect::from_center_size(pos2(x, hrect.center().y), vec2(9.0, hrect.height()));
+        let r = ui.interact(
+            hit,
+            ui.scope_id().with(("col_divider", i)),
+            Sense::click_and_drag(),
+        );
+        let active = r.hovered() || r.dragged();
+        if active {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        ui.painter().line_segment(
+            [pos2(x, hrect.top() + 5.0), pos2(x, hrect.bottom() - 5.0)],
+            Stroke::new(
+                if active { 2.0 } else { 1.0 },
+                if active { p.accent } else { p.border_strong },
+            ),
+        );
+        if r.double_clicked() {
+            let d = ColWidths::default();
+            match col {
+                Col::Graph => w.graph = None,
+                Col::Date => w.date = d.date,
+                Col::Author => w.author = d.author,
+                Col::Hash => w.hash = d.hash,
+            }
+            changed = true;
+            continue;
+        }
+        let dx = r.drag_delta().x;
+        if dx == 0.0 {
+            continue;
+        }
+        // Keep Description at least DESC_MIN wide.
+        let used = graph_w + 4.0 + w.date + w.author + w.hash + 3.0 * COL_GAP;
+        let spare = (hrect.width() - DESC_MIN - used).max(0.0);
+        match col {
+            Col::Graph => {
+                w.graph = Some((graph_w + dx.min(spare)).clamp(16.0, 700.0));
+            }
+            Col::Date => w.date = (w.date - dx.max(-spare)).clamp(70.0, 320.0),
+            Col::Author => w.author = (w.author - dx.max(-spare)).clamp(60.0, 400.0),
+            Col::Hash => w.hash = (w.hash - dx.max(-spare)).clamp(50.0, 240.0),
+        }
+        changed = true;
+    }
+    changed
 }
 
 fn clipped_text(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
@@ -1438,6 +1559,28 @@ pub fn file_row(
 // ---------------------------------------------------------------------------
 
 pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
+    // Pick the first changed file so the diff pane isn't empty (or still showing a commit).
+    if !matches!(
+        tab.diff_target,
+        Some(DiffTarget::Staged { .. } | DiffTarget::Unstaged { .. })
+    ) {
+        let first = tab
+            .status
+            .unstaged
+            .first()
+            .map(|f| DiffTarget::Unstaged {
+                path: f.path.clone(),
+            })
+            .or_else(|| {
+                tab.status.staged.first().map(|f| DiffTarget::Staged {
+                    path: f.path.clone(),
+                })
+            });
+        if let Some(t) = first {
+            tab.select_diff(t);
+        }
+    }
+
     egui::Panel::bottom("commit_box")
         .resizable(true)
         .default_size(170.0)
@@ -1563,7 +1706,14 @@ pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<
         });
 
     egui::CentralPanel::default().show(ui, |ui| {
-        diffview::diff_view(ui, tab, actions);
+        if matches!(tab.diff_target, Some(DiffTarget::Commit { .. })) {
+            // working copy is clean: don't show the History selection here
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("No local changes").weak());
+            });
+        } else {
+            diffview::diff_view(ui, tab, actions);
+        }
     });
 }
 
@@ -1606,7 +1756,11 @@ fn commit_box(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
                 .color(p.text_strong),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new("Ctrl+Enter to commit").weak().small());
+            ui.label(
+                RichText::new(format!("{} to commit", theme::shortcut("Enter")))
+                    .weak()
+                    .small(),
+            );
         });
     });
     let editor = egui::TextEdit::multiline(&mut tab.commit_msg)

@@ -1,119 +1,121 @@
-# RustTree 🌳
+<p align="center"><img src="assets/icon/foxgit-1024.png" width="140" alt="FoxGit"></p>
 
-โปรแกรม Git GUI แบบ Sourcetree เขียนด้วย Rust ทำงานเร็วและกินแรมน้อย ใช้ได้บน Windows, macOS และ Linux
+<h1 align="center">FoxGit</h1>
 
-![Tabs + History](screenshot-tabs.png)
-![Projects](screenshot-projects.png)
-![File Status](screenshot-status.png)
+<p align="center">โปรแกรม Git แบบ Sourcetree ที่เร็ว เบา และใช้ง่าย — macOS · Windows · Linux</p>
 
-## แท็บโปรเจกต์ (เปิดหลายโปรเจกต์ในหน้าต่างเดียว)
+<p align="center"><a href="../../releases/latest"><b>⬇ ดาวน์โหลดเวอร์ชันล่าสุด</b></a></p>
 
-- **แท็บแบบเว็บเบราว์เซอร์**: แต่ละแท็บมีจุดสีประจำโปรเจกต์ บอก branch ปัจจุบัน มีป้ายสีส้มบอกจำนวนไฟล์ที่ยังไม่ commit และ ↑↓ บอกจำนวน commit ที่ต้อง push/pull จึงไม่ต้องเปิดเข้าไปดูทีละแท็บ
-- **ลากแท็บเพื่อเรียงลำดับใหม่**, คลิกปุ่มกลางเมาส์เพื่อปิด, คลิกขวาเพื่อปิดแท็บอื่น / ปิดแท็บทางขวา / ปักหมุด / เปิดโฟลเดอร์ / คัดลอก path
-- เปิดโปรแกรมใหม่จะ**ได้แท็บเดิมกลับมาครบ** ตามลำดับเดิม และกลับมาที่หน้าต่างเมื่อไหร่ ทุกโปรเจกต์จะรีเฟรชเอง
-- **หน้า Projects** (กด `+` หรือ `Ctrl+T`): พิมพ์ค้นหาชื่อโปรเจกต์แล้วกด Enter ได้เลย หรือวาง path ของโฟลเดอร์ก็ได้ ปักหมุด ★ โปรเจกต์ที่ใช้บ่อยไว้บนสุด และมีปุ่ม "Open all pinned" เปิดโปรเจกต์ที่ปักหมุดทั้งหมดในครั้งเดียว
-- **Scan folder for repos**: เลือกโฟลเดอร์ เช่น `~/Projects` แล้วโปรแกรมจะหา Git repo ทุกตัวข้างในมาใส่รายการให้ (ข้าม `node_modules`, `target` และโฟลเดอร์ที่ซ่อนอยู่)
-- เปิดหลายโปรเจกต์จาก command line ได้: `rusttree ~/work/api ~/work/web ~/work/app`
+![History](docs/screenshots/history.png)
 
-## ใหม่ในเวอร์ชันนี้
+## ดาวน์โหลดและติดตั้ง
 
-### Stage ทีละ hunk / ทีละบรรทัด
+ไปที่หน้า [**Releases**](../../releases/latest) แล้วเลือกไฟล์ตามเครื่อง
 
-![Hunk staging](screenshot-hunks.png)
+| เครื่อง | ไฟล์ | วิธีติดตั้ง |
+|---|---|---|
+| **macOS** 11 ขึ้นไป (Apple Silicon และ Intel) | `FoxGit-x.y.z-macos.dmg` | เปิดไฟล์ แล้วลาก FoxGit ไปไว้ใน Applications |
+| **Windows** 10/11 (64-bit) | `FoxGit-x.y.z-windows-x64.zip` | แตกไฟล์ แล้วเปิด `FoxGit.exe` (วางไว้โฟลเดอร์ไหนก็ได้) |
+| **Ubuntu / Debian** | `foxgit_x.y.z_amd64.deb` | `sudo apt install ./foxgit_*.deb` |
+| **Linux อื่น ๆ** (x86-64) | `FoxGit-x.y.z-linux-x64.tar.gz` | แตกไฟล์ แล้วรัน `./install.sh` (ไม่ต้องใช้ root) |
 
-- ในหน้า File Status แต่ละ hunk ของ diff มีปุ่ม **Stage hunk** และ **Discard hunk** (ถ้าเป็นไฟล์ที่ stage แล้วจะเป็น **Unstage hunk**)
-- **เลือกเฉพาะบรรทัด**: คลิกที่บรรทัด + หรือ − (หรือลากผ่านหลายบรรทัด, Shift+คลิกเพื่อเลือกต่อ) จะมีแถบ **Stage lines / Discard lines / Unstage lines** ขึ้นมา กด Esc เพื่อยกเลิกที่เลือก
-- ใช้ `git apply` จริง ไม่แตะบรรทัดที่ไม่ได้เลือก รองรับไฟล์ CRLF, ไฟล์ที่ไม่มี newline ตอนท้าย, encoding ที่ไม่ใช่ UTF-8 (เช่น TIS-620) และชื่อไฟล์ภาษาไทย
-- Discard ทุกแบบมีหน้าต่างให้ยืนยันก่อน
-- ไฟล์ใหม่ ไฟล์ที่ลบ และไฟล์ที่ conflict ยังต้อง stage ทั้งไฟล์
+**ต้องมี Git ในเครื่อง** ถ้ายังไม่มี FoxGit จะขึ้นแถบเตือนพร้อมปุ่มดาวน์โหลด
+- macOS: `xcode-select --install` (หรือ `brew install git`)
+- Windows / Linux: https://git-scm.com/downloads
 
-### หน้าต่างใส่รหัสผ่าน / token
-- ถ้า push / pull / fetch ต้อง login (HTTPS) หรือ SSH key มี passphrase โปรแกรมจะเด้งหน้าต่างถาม ช่องรหัสผ่านซ่อนตัวอักษร
-- ติ๊ก "Remember" แล้วจะจำไว้**ในหน่วยความจำ**จนกว่าจะปิดโปรแกรม (ไม่เขียนลงดิสก์) ถ้ารหัสผิด โปรแกรมจะลืมรหัสนั้นแล้วถามใหม่ในครั้งต่อไป
-- ถ้าเครื่องมี credential helper อยู่แล้ว (เช่น Git Credential Manager บน Windows/macOS) git จะใช้ตัวนั้นก่อนตามปกติ
-- ทำงานโดยตั้งตัวโปรแกรมเองเป็น `GIT_ASKPASS` / `SSH_ASKPASS` และคุยกับหน้าต่างหลักผ่าน localhost ที่มี token สุ่มป้องกันไว้
+**เปิดครั้งแรก**
+- **macOS** ถ้าขึ้นว่า "cannot be opened / developer cannot be verified" ให้คลิกขวาที่ FoxGit แล้วเลือก **Open** หรือไปที่ System Settings → Privacy & Security → **Open Anyway** (ทำครั้งเดียว)
+- **Windows** ถ้า SmartScreen ขึ้นว่า "Windows protected your PC" ให้กด **More info** → **Run anyway**
+- ถ้าล็อกอิน GitHub ไว้ macOS อาจถามสิทธิ์เข้า Keychain ให้กด **Always Allow**
 
-### Auto-fetch ทุกโปรเจกต์
-- Fetch ทุกแท็บที่เปิดอยู่ให้เองใน background (ค่าเริ่มต้นทุก 10 นาที รอบแรกประมาณ 30 วินาทีหลังเปิดโปรแกรม) ตัวเลข ↓ บนแท็บจะอัปเดตเอง
-- ถ้ามี commit ใหม่บน remote จะมีแจ้งเตือน เช่น "shop-api: 2 new commit(s) on origin/main — Pull to update"
-- ตั้งค่าได้ที่เมนู **Repository → Auto-fetch** (ปิด / 5 / 10 / 15 / 30 นาที) และมี **Fetch all open projects now** ให้สั่ง fetch ทุกโปรเจกต์ทันที
-- Auto-fetch จะไม่เด้งถามรหัสผ่านมากวน ถ้ายังไม่มีรหัสที่จำไว้ก็ข้ามไปเงียบ ๆ
-- เอาเมาส์ชี้ที่แท็บจะเห็นว่า fetch ล่าสุดเมื่อไหร่
+FoxGit เช็กเวอร์ชันใหม่ให้เองวันละครั้ง ถ้ามีจะมีปุ่ม **Update** สีเขียวขึ้นที่ toolbar
 
-## ทำอะไรได้บ้าง
+## ความสามารถ
 
-| ส่วน | ความสามารถ |
+![File Status](docs/screenshots/status.png)
+
+| ส่วน | ทำอะไรได้ |
 |---|---|
-| **History** | กราฟ commit สีตาม branch, ป้าย branch/remote/tag, ค้นหาจากข้อความ/ผู้เขียน/SHA, เลื่อนด้วยปุ่ม ↑↓, โหลดเพิ่มทีละชุด |
-| **รายละเอียด commit** | ข้อมูล commit, parent (คลิกเพื่อไปที่ commit นั้น), รายชื่อไฟล์ที่เปลี่ยน, diff พร้อมเลขบรรทัด, ปรับจำนวนบรรทัด context ได้ |
-| **File Status** | แยกไฟล์ staged/unstaged, stage/unstage ทีละไฟล์ ทีละ hunk ทีละบรรทัด หรือทั้งหมด (ดับเบิลคลิกไฟล์ก็ได้), discard (มีหน้าต่างยืนยัน) |
-| **Commit** | ช่องพิมพ์ข้อความ, Amend, "Push ทันที", ใช้ Ctrl+Enter เพื่อ commit |
-| **Branch** | สร้าง/checkout (ดับเบิลคลิก)/merge/rebase/ลบ, checkout branch จาก remote แบบ tracking, แสดง ↑ahead ↓behind |
-| **Remote** | Fetch, Pull (merge หรือ rebase), Push (ตั้ง upstream / force-with-lease ได้), Clone, หน้าต่างใส่รหัสผ่าน/token, Auto-fetch |
-| **คลิกขวาที่ commit** | Checkout, สร้าง branch/tag, Merge, Cherry-pick, Revert, Reset (soft/mixed/hard), คัดลอก SHA |
-| **อื่น ๆ** | Stash (save/apply/pop/drop), Tag, ธีมมืด/สว่าง, หน้าต่าง Log ดู output ของ git, รีเฟรชอัตโนมัติเมื่อกลับมาที่หน้าต่าง (หรือกด F5) |
-| **ภาษาไทย** | ข้อความ commit และชื่อไฟล์ภาษาไทยแสดงผลได้ (ใช้ฟอนต์ของระบบอัตโนมัติ) |
+| **แท็บโปรเจกต์** | เปิดหลาย repo ในหน้าต่างเดียวแบบแท็บเบราว์เซอร์ มีจุดสีประจำโปรเจกต์ บอก branch, จำนวนไฟล์ที่ยังไม่ commit และ ↑↓ ที่ต้อง push/pull ลากเรียงได้ เปิดโปรแกรมใหม่ได้แท็บเดิมกลับมาครบ |
+| **History** | กราฟ commit สีตาม branch, ป้าย branch/remote/tag, ค้นหาจากข้อความ/ผู้เขียน/SHA, **ลากปรับความกว้างคอลัมน์ได้** (ดับเบิลคลิกเส้นแบ่งเพื่อคืนค่าเดิม) |
+| **Branch แบ่งโฟลเดอร์** | `feature/login`, `feature/ui` รวมอยู่ในโฟลเดอร์ `feature` ทั้ง branch ในเครื่องและ remote กดยุบ/ขยายได้ |
+| **File Status** | stage / unstage / discard ทีละไฟล์ **ทีละ hunk หรือทีละบรรทัด** (คลิกหรือลากเลือกบรรทัด + / −) รองรับ CRLF, ไฟล์ไม่มี newline ท้ายไฟล์, encoding ที่ไม่ใช่ UTF-8 และชื่อไฟล์ภาษาไทย |
+| **Commit** | Amend, "Commit & Push" ทีเดียว, ⌘/Ctrl + Enter |
+| **Branch / Remote** | สร้าง, checkout, merge, rebase, ลบ, push (ตั้ง upstream / force-with-lease), pull (merge/rebase), fetch, clone, auto-fetch ทุกแท็บใน background |
+| **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
+| **บัญชี GitHub** | Sign in ผ่านเบราว์เซอร์หรือวาง Personal Access Token เก็บใน Keychain ของระบบ push/pull ไป github.com ไม่ต้องใส่รหัสอีก |
+| **Clone จาก GitHub** | หน้า **Projects → Remote** แสดง repo ทั้งหมดที่บัญชีมีสิทธิ์ (ของตัวเอง, org, ที่เป็น collaborator) ค้นหาแล้วกด Clone ได้เลย |
+| **อื่น ๆ** | Stash, Tag, ธีมมืด/สว่าง, หน้าต่าง Log ดู output ของ git, ถาม passphrase/รหัสผ่านผ่านหน้าต่าง, ภาษาไทยแสดงผลได้ |
 
-## ทำไมถึงเร็ว
+<p align="center"><img src="docs/screenshots/projects.png" width="49%" alt="Projects"> <img src="docs/screenshots/light.png" width="49%" alt="Light theme"></p>
 
-- **อ่านข้อมูล** (history, branch, status, diff) ผ่าน **libgit2** ในโปรเซสเดียวกัน ไม่ต้องเรียกโปรแกรม `git` แยก ทดสอบกับ repo ของ tokio (5,236 commits, 83 branches) โหลด history พร้อมคำนวณกราฟเสร็จใน **~70 ms**
-- โหลด history ใน **background thread** หน้าจอจึงไม่ค้าง
-- รายการ commit และ diff วาดเฉพาะแถวที่อยู่บนจอ (virtualized) จึงลื่นแม้ diff ยาวหลายหมื่นบรรทัด
-- GUI ใช้ **egui** (immediate-mode, วาดด้วย GPU) ไม่มี Electron/เว็บเบราว์เซอร์
-- **คำสั่งที่เขียนข้อมูล** (commit, push, pull, merge …) เรียก `git` ที่ติดตั้งในเครื่อง ทำให้ hooks, GPG signing, SSH key และ credential manager ทำงานเหมือนใช้ใน Terminal ทุกอย่าง คำสั่งพวกนี้รันใน background thread
+### ปุ่มลัด
 
-## ติดตั้งและรัน
+| ปุ่ม (macOS ใช้ ⌘ แทน Ctrl) | ทำอะไร |
+|---|---|
+| `Ctrl + T` | หน้า Projects (เปิดโปรเจกต์ในแท็บใหม่) |
+| `Ctrl + W` | ปิดแท็บ |
+| `Ctrl + Tab` / `Ctrl + Shift + Tab` | แท็บถัดไป / ก่อนหน้า |
+| `Ctrl + 1…8`, `Ctrl + 9` | ไปที่แท็บที่ 1–8, แท็บสุดท้าย |
+| `Ctrl + O` | เปิด repository |
+| `F5` | รีเฟรช |
+| `↑` / `↓` | เลื่อนเลือก commit |
+| `Ctrl + Enter` | Commit |
+| ดับเบิลคลิก branch / ไฟล์ | Checkout / Stage–Unstage |
 
-ต้องมี:
-1. **Rust** (1.95 ขึ้นไป — อัปเดตด้วย `rustup update`): https://rustup.rs
-2. **Git** ที่เรียกใช้จาก PATH ได้
-3. **C compiler** สำหรับ build libgit2 (มีให้อัตโนมัติเมื่อติดตั้ง Rust บน Windows ด้วย Visual Studio Build Tools / บน macOS ใช้ `xcode-select --install`)
-   - Linux (Ubuntu/Debian) ต้องติดตั้งเพิ่ม: `sudo apt install build-essential pkg-config libx11-dev libxkbcommon-dev libgl1-mesa-dev libgtk-3-dev`
+### ทำไมถึงเร็ว
+
+- อ่าน history, branch, status และ diff ผ่าน **libgit2** ในโปรเซสเดียวกัน (repo 5,000 commits โหลดพร้อมกราฟใน ~70 ms) และโหลดใน background thread หน้าจอไม่ค้าง
+- รายการ commit และ diff วาดเฉพาะแถวที่อยู่บนจอ ลื่นแม้ diff ยาวหลายหมื่นบรรทัด
+- GUI วาดด้วย GPU (egui) ไม่ใช่ Electron
+- คำสั่งที่เขียนข้อมูล (commit, push, pull, merge …) เรียก `git` ในเครื่อง hooks, GPG signing, SSH key, git-lfs และ credential manager จึงทำงานเหมือนใน Terminal (เปิดจาก Finder/Dock ก็ใช้ PATH เดียวกับ Terminal)
+
+## สำหรับนักพัฒนา
+
+### Build จากซอร์ส
+
+ต้องมี [Rust](https://rustup.rs) 1.95 ขึ้นไป, Git และ C compiler (macOS: `xcode-select --install`, Windows: Visual Studio Build Tools, Ubuntu: `sudo apt install build-essential pkg-config libxkbcommon-dev libgl1-mesa-dev libx11-dev libwayland-dev`)
 
 ```bash
-cd rusttree
-cargo run --release                 # เปิดโปรแกรม
-cargo run --release -- /path/to/repo   # เปิด repo ทันที
+cargo run --release                    # เปิดโปรแกรม
+cargo run --release -- ~/work/api ~/work/web   # เปิดหลาย repo เป็นแท็บ
+cargo test                             # เทสต์ (สร้าง repo ชั่วคราวด้วย git จริง)
+scripts/bundle-macos.sh --universal --dmg      # FoxGit.app + .dmg (macOS)
+scripts/demo-repos.sh                  # repo ตัวอย่างใน /tmp สำหรับลองเล่น / ถ่ายภาพหน้าจอ
 ```
 
-ไฟล์โปรแกรมที่ build แล้วอยู่ที่ `target/release/rusttree` (บน Windows คือ `rusttree.exe`) คัดลอกไปใช้ที่ไหนก็ได้
+ปล่อยเวอร์ชันใหม่: ดู [docs/RELEASING.md](docs/RELEASING.md) (push tag แล้ว GitHub Actions build ให้ครบทุกระบบ)
 
-รันเทสต์: `cargo test`
-
-## ปุ่มลัด
-
-| ปุ่ม | ทำอะไร |
-|---|---|
-| `Ctrl/Cmd + T` | หน้า Projects (เปิดโปรเจกต์ในแท็บใหม่) |
-| `Ctrl/Cmd + W` | ปิดแท็บ |
-| `Ctrl + Tab` / `Ctrl + Shift + Tab` | แท็บถัดไป / ก่อนหน้า (หรือ `Ctrl + PageDown/PageUp`) |
-| `Ctrl/Cmd + 1…8` | ไปที่แท็บที่ 1–8 (`Ctrl + 9` = แท็บสุดท้าย) |
-| `Ctrl/Cmd + O` | เปิด repository |
-| `F5` | รีเฟรช |
-| `↑` / `↓` | เลื่อนเลือก commit ในหน้า History |
-| `Ctrl/Cmd + Enter` | Commit (ขณะพิมพ์ข้อความ commit) |
-| ดับเบิลคลิก branch | Checkout |
-| ดับเบิลคลิกไฟล์ | Stage / Unstage |
-| คลิกปุ่มกลางเมาส์ที่แท็บ | ปิดแท็บ |
-
-## โครงสร้างโค้ด
+### โครงสร้างโค้ด
 
 ```
 src/
-├── main.rs      จุดเริ่มโปรแกรม, ตั้งค่าหน้าต่าง
-├── app.rs       state ของแอป, toolbar, dialog, คิวงาน background, ปุ่มลัด
-├── tabs.rs      แถบแท็บโปรเจกต์ + หน้า Projects + สแกนหา repo
-├── views.rs     sidebar, หน้า History (วาดกราฟ), หน้า File Status, กล่อง commit
-├── diffview.rs  ตัวแสดง diff
-├── graph.rs     อัลกอริทึมจัดเลน (lane) ของกราฟ commit + เทสต์
-└── git.rs       backend: อ่านด้วย libgit2, เขียนด้วย git CLI + เทสต์
+├── main.rs        จุดเริ่มโปรแกรม, หน้าต่าง, icon, crash log, ย้ายข้อมูลจากชื่อเดิม
+├── app.rs         state ของแอป, toolbar, dialog, คิวงาน background, ปุ่มลัด, About, เช็กอัปเดต
+├── theme.rs       สีและสไตล์ธีมมืด/สว่าง, widget ที่วาดเอง
+├── tabs.rs        แถบแท็บ + หน้า Projects + สแกนหา repo
+├── views.rs       sidebar, History (กราฟ + คอลัมน์ปรับขนาดได้), File Status, กล่อง commit
+├── branchtree.rs  จัด branch เป็นโฟลเดอร์ตาม `/`
+├── diffview.rs    ตัวแสดง diff + stage ทีละ hunk/บรรทัด
+├── graph.rs       อัลกอริทึมจัดเลนของกราฟ commit
+├── git.rs         backend: อ่านด้วย libgit2, เขียนด้วย git CLI
+├── github.rs      GitHub API, device flow, Keychain, credential ให้ git
+├── account.rs     หน้าต่าง Sign in, เมนูบัญชี, หน้า Remote
+├── askpass.rs     หน้าต่างถามรหัสผ่านให้ git/ssh
+├── shellenv.rs    PATH จาก login shell + ตรวจว่ามี git
+└── update.rs      เช็กเวอร์ชันใหม่จาก GitHub Releases
 ```
 
-อยากเพิ่มคำสั่ง git ใหม่: เพิ่ม variant ใน `enum Op` (`git.rs`) แล้วใส่คำสั่งใน `Op::run` จากนั้นเรียก `actions.push(Action::Run(Op::...))` จาก UI ได้เลย
+อยากเพิ่มคำสั่ง git: เพิ่ม variant ใน `enum Op` (`git.rs`), ใส่คำสั่งใน `Op::run` แล้วเรียก `actions.push(Action::Run(Op::...))` จาก UI
 
-## ข้อจำกัดของเวอร์ชันนี้
+### ข้อจำกัดตอนนี้
 
-- ยังไม่มีตัวช่วยแก้ conflict ต้องแก้ไฟล์เองแล้วค่อย stage และ commit (มีแถบเตือนและปุ่ม Abort merge)
+- ยังไม่มีหน้าช่วยแก้ conflict (มีแถบเตือนและปุ่ม Abort merge)
+- เปิดโปรแกรมซ้ำจะได้หน้าต่างใหม่ (ยังไม่มีโหมดหน้าต่างเดียว)
+- stage ทีละ hunk/บรรทัดได้เฉพาะไฟล์ที่แก้ไข (ไฟล์ใหม่/ลบ/conflict ต้อง stage ทั้งไฟล์)
 - ไม่รองรับ bare repository
-- รหัสที่ติ๊ก Remember จะจำไว้แค่จนปิดโปรแกรม ถ้าอยากจำถาวร ให้ใช้ Git Credential Manager หรือ SSH key
-- SSH ที่ถาม passphrase ผ่านหน้าต่างได้ต้องใช้ OpenSSH 8.4 ขึ้นไป (Windows 10/11, macOS และ Linux รุ่นใหม่ ๆ มีให้อยู่แล้ว)
+- repo ของ org ที่จำกัดสิทธิ์ OAuth App จะไม่ขึ้นในหน้า Remote จนกว่า org จะอนุญาต (หรือใช้ token แทน)
+
+## License
+
+[MIT](LICENSE) · ส่วนประกอบโอเพนซอร์สที่ใช้: [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt) (รวม libgit2 และฟอนต์ที่มากับ egui)

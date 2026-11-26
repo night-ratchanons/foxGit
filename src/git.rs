@@ -214,8 +214,7 @@ impl FileDiff {
             let mut body: Vec<u8> = Vec::new();
             let (mut old_n, mut new_n, mut changes) = (0u32, 0u32, 0usize);
             let mut last_emitted = false;
-            for i in h.header + 1..h.end {
-                let l = &self.lines[i];
+            for (i, l) in (h.header + 1..h.end).zip(&self.lines[h.header + 1..h.end]) {
                 let emit: Option<u8> = match l.kind {
                     LineKind::Context => Some(b' '),
                     LineKind::Added if selected(i) => Some(b'+'),
@@ -747,6 +746,11 @@ pub fn run_git_ext(
     // (`-c` options must come before the subcommand.)
     if let Some((pre, env)) = crate::github::git_credential() {
         cmd.args(pre).envs(env);
+    }
+    // Started from Finder / a launcher: use the login shell's PATH so hooks, gpg, git-lfs and
+    // credential helpers resolve like in a terminal (also picks Homebrew's git if present).
+    if let Some(path) = crate::shellenv::path() {
+        cmd.env("PATH", path);
     }
     cmd.current_dir(dir)
         .args(args)

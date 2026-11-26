@@ -6,6 +6,7 @@ use crate::git::{self, CommitInfo, DiffTarget, FileChange, FileDiff, Op, Refs, R
 use crate::graph::{self, GraphRow};
 use crate::tabs::{self, LauncherEvent, LauncherMode, LauncherState, Project, TabEvent, TabInfo};
 use crate::theme;
+use crate::update::{self, Release};
 use crate::views;
 use eframe::egui;
 use egui::{Color32, RichText};
@@ -362,6 +363,16 @@ struct Saved {
     /// Folder the last clone went into.
     #[serde(default)]
     clone_parent: Option<String>,
+    /// Unix time of the last automatic update check.
+    #[serde(default)]
+    last_update_check: i64,
+}
+
+/// Result of looking for `git` at startup.
+enum GitCheck {
+    Checking(Receiver<Result<String, String>>),
+    Found,
+    Missing(String),
 }
 
 enum FetchMsg {
@@ -369,13 +380,14 @@ enum FetchMsg {
     Done,
 }
 
+// Kept from the RustTree days so saved state carries over after the rename.
 const STORAGE_KEY: &str = "rusttree_state";
 
 // ---------------------------------------------------------------------------
 // App
 // ---------------------------------------------------------------------------
 
-pub struct RustTreeApp {
+pub struct FoxGitApp {
     tabs: Vec<RepoTab>,
     active: usize,
     next_id: u64,
@@ -416,9 +428,16 @@ pub struct RustTreeApp {
 
     github: GitHub,
     clone_parent: String,
+
+    git_check: GitCheck,
+    show_about: bool,
+    logo: Option<egui::TextureHandle>,
+    update: Option<Release>,
+    update_rx: Option<Receiver<update::CheckResult>>,
+    last_update_check: i64,
 }
 
-impl RustTreeApp {
+impl FoxGitApp {
     pub fn new(cc: &eframe::CreationContext<'_>, initial: Vec<String>) -> Self {
         let saved: Saved = cc
             .storage
@@ -486,8 +505,30 @@ impl RustTreeApp {
                 saved.github_client_id.clone(),
             ),
             clone_parent: saved.clone_parent.clone().unwrap_or_else(dirs_home),
+            git_check: GitCheck::Found,
+            show_about: false,
+            logo: None,
+            update: None,
+            update_rx: None,
+            last_update_check: saved.last_update_check,
         };
         app.apply_theme(&cc.egui_ctx);
+        app.start_git_check(&cc.egui_ctx);
+        if chrono::Utc::now().timestamp() - app.last_update_check > 24 * 3600 {
+            app.start_update_check(&cc.egui_ctx, false);
+        }
+        if let Some(log) = crate::crash_log_path().filter(|p| p.exists()) {
+            let prev = log.with_file_name("crash-previous.log");
+            if std::fs::rename(&log, &prev).is_ok() {
+                app.notify(
+                    format!(
+                        "FoxGit hit an internal error last time. Details: {} — please attach it when reporting the bug.",
+                        prev.display()
+                    ),
+                    false,
+                );
+            }
+        }
 
         for p in &saved.open_tabs {
             app.open_repo_quiet(Path::new(p));
@@ -502,6 +543,187 @@ impl RustTreeApp {
 
     fn apply_theme(&self, ctx: &egui::Context) {
         theme::apply(ctx, self.dark);
+    }
+
+    fn start_git_check(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::shellenv::check_git());
+            ctx.request_repaint();
+        });
+        self.git_check = GitCheck::Checking(rx);
+    }
+
+    /// `manual` = from the menu: always report the result.
+    fn start_update_check(&mut self, ctx: &egui::Context, manual: bool) {
+        if update::REPO.is_none() || self.update_rx.is_some() {
+            return;
+        }
+        self.last_update_check = chrono::Utc::now().timestamp();
+        let (tx, rx) = channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((manual, update::check()));
+            ctx.request_repaint();
+        });
+        self.update_rx = Some(rx);
+    }
+
+    fn poll_checks(&mut self) {
+        if let GitCheck::Checking(rx) = &self.git_check {
+            if let Ok(res) = rx.try_recv() {
+                self.git_check = match res {
+                    Ok(_) => GitCheck::Found,
+                    Err(e) => GitCheck::Missing(e),
+                };
+            }
+        }
+        if let Some(rx) = &self.update_rx {
+            if let Ok((manual, res)) = rx.try_recv() {
+                self.update_rx = None;
+                match res {
+                    Ok(Some(rel)) => {
+                        self.notify(
+                            format!(
+                                "FoxGit {} is available — click Update in the toolbar",
+                                rel.version()
+                            ),
+                            true,
+                        );
+                        self.update = Some(rel);
+                    }
+                    Ok(None) if manual => self.notify(
+                        format!("You're on the latest version ({})", update::VERSION),
+                        true,
+                    ),
+                    Err(e) if manual => self.notify(format!("Update check failed: {e}"), false),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn git_missing_banner(&mut self, ui: &mut egui::Ui) {
+        let GitCheck::Missing(err) = &self.git_check else {
+            return;
+        };
+        let err = err.clone();
+        let p = theme::palette(self.dark);
+        let mut retry = false;
+        egui::Panel::top("git_missing")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::alpha(p.red, 0.14))
+                    .inner_margin(egui::Margin::symmetric(14, 8)),
+            )
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(16.0).color(p.red));
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new("Git was not found on this computer")
+                                .strong()
+                                .color(p.text_strong),
+                        );
+                        let hint = if cfg!(target_os = "macos") {
+                            "FoxGit needs Git to commit, pull and push. Install it with  xcode-select --install  (or from git-scm.com), then click Retry."
+                        } else {
+                            "FoxGit needs Git to commit, pull and push. Install it from git-scm.com, then click Retry."
+                        };
+                        ui.label(RichText::new(hint).color(p.subtext));
+                        if !err.is_empty() {
+                            ui.label(RichText::new(err.as_str()).small().color(p.faint));
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Retry").clicked() {
+                            retry = true;
+                        }
+                        if theme::primary_button(ui, "Download Git", true).clicked() {
+                            ui.ctx()
+                                .open_url(egui::OpenUrl::new_tab("https://git-scm.com/downloads"));
+                        }
+                    });
+                });
+            });
+        if retry {
+            let ctx = ui.ctx().clone();
+            self.start_git_check(&ctx);
+        }
+    }
+
+    fn about_window(&mut self, ctx: &egui::Context) {
+        if !self.show_about {
+            return;
+        }
+        if self.logo.is_none() {
+            if let Ok(icon) =
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/foxgit-512.png"))
+            {
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                );
+                self.logo = Some(ctx.load_texture("foxgit_logo", img, Default::default()));
+            }
+        }
+        let mut open = true;
+        let mut check = false;
+        egui::Window::new("About FoxGit")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, -30.0])
+            .show(ctx, |ui| {
+                let p = theme::pal(ui);
+                ui.set_width(380.0);
+                ui.vertical_centered(|ui| {
+                    if let Some(logo) = &self.logo {
+                        ui.add(egui::Image::new((logo.id(), egui::vec2(112.0, 112.0))));
+                    }
+                    ui.label(
+                        RichText::new("FoxGit")
+                            .size(24.0)
+                            .strong()
+                            .color(p.text_strong),
+                    );
+                    ui.label(
+                        RichText::new(format!("Version {}", update::VERSION)).color(p.subtext),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("A fast, friendly Git client.").color(p.text));
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if let Some(url) = update::repo_url() {
+                            if ui.link("Website").clicked() {
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
+                            }
+                            if ui.link("Report a problem").clicked() {
+                                ui.ctx()
+                                    .open_url(egui::OpenUrl::new_tab(format!("{url}/issues")));
+                            }
+                        }
+                        if ui.link("Open-source licenses").clicked() {
+                            open_licenses(ui.ctx());
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if update::REPO.is_some() && ui.button("Check for updates").clicked() {
+                        check = true;
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("© 2026 FoxGit contributors · MIT License")
+                            .small()
+                            .color(p.faint),
+                    );
+                });
+            });
+        if check {
+            self.start_update_check(ctx, true);
+        }
+        self.show_about = open;
     }
 
     fn open_repo_quiet(&mut self, path: &Path) -> bool {
@@ -683,7 +905,10 @@ impl RustTreeApp {
             let repo_btn = theme::ghost_button(ui, "☰", "Repository", 0, false);
             egui::Popup::menu(&repo_btn).show(|ui| {
                 ui.set_min_width(250.0);
-                if ui.button("Open…   (Ctrl+O)").clicked() {
+                if ui
+                    .button(format!("Open…   ({})", theme::shortcut("O")))
+                    .clicked()
+                {
                     ui.close();
                     self.pick_folder();
                 }
@@ -699,7 +924,10 @@ impl RustTreeApp {
                     ui.close();
                     self.init_folder();
                 }
-                if ui.button("Projects…   (Ctrl+T)").clicked() {
+                if ui
+                    .button(format!("Projects…   ({})", theme::shortcut("T")))
+                    .clicked()
+                {
                     ui.close();
                     self.open_launcher();
                 }
@@ -755,6 +983,22 @@ impl RustTreeApp {
                     self.dark = !self.dark;
                     self.apply_theme(ui.ctx());
                     ui.close();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        update::REPO.is_some(),
+                        egui::Button::new("Check for updates…"),
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                    let ctx = ui.ctx().clone();
+                    self.start_update_check(&ctx, true);
+                }
+                if ui.button("About FoxGit").clicked() {
+                    ui.close();
+                    self.show_about = true;
                 }
             });
 
@@ -833,6 +1077,25 @@ impl RustTreeApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
+                if let Some(rel) = &self.update {
+                    let p = theme::pal(ui);
+                    let btn = egui::Button::new(
+                        RichText::new(format!("⬆  Update to {}", rel.version()))
+                            .strong()
+                            .color(p.on_accent),
+                    )
+                    .fill(p.green)
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(14.0)
+                    .min_size(egui::vec2(0.0, 26.0));
+                    if ui
+                        .add(btn)
+                        .on_hover_text("Open the download page for the new version")
+                        .clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&rel.html_url));
+                    }
+                }
                 match self.github.toolbar_button(ui) {
                     Some(MenuAction::OpenRemote) => {
                         self.open_launcher();
@@ -920,7 +1183,7 @@ impl RustTreeApp {
                 );
             }
             if !is_yes_no {
-                ui.checkbox(&mut self.ask_remember, "Remember until RustTree is closed (memory only, never written to disk)");
+                ui.checkbox(&mut self.ask_remember, "Remember until FoxGit is closed (memory only, never written to disk)");
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1364,7 +1627,11 @@ impl RustTreeApp {
         ui.horizontal(|ui| {
             if self.show_launcher {
                 ui.label(
-                    RichText::new("Ctrl+T projects · Ctrl+Tab next tab · Ctrl+1…9 jump to tab · Ctrl+W close tab")
+                    RichText::new(if cfg!(target_os = "macos") {
+                        "⌘T projects · Ctrl+Tab next tab · ⌘1…9 jump to tab · ⌘W close tab"
+                    } else {
+                        "Ctrl+T projects · Ctrl+Tab next tab · Ctrl+1…9 jump to tab · Ctrl+W close tab"
+                    })
                         .weak(),
                 );
                 return;
@@ -1810,7 +2077,7 @@ impl RustTreeApp {
     }
 }
 
-impl eframe::App for RustTreeApp {
+impl eframe::App for FoxGitApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.pump_jobs(ctx);
         self.poll_scan();
@@ -1819,6 +2086,7 @@ impl eframe::App for RustTreeApp {
         for (text, ok) in self.github.poll() {
             self.notify(text, ok);
         }
+        self.poll_checks();
         if self.auto_fetch_min > 0 {
             let every = Duration::from_secs(self.auto_fetch_min as u64 * 60);
             let since = self.last_auto_fetch.elapsed();
@@ -1860,6 +2128,8 @@ impl eframe::App for RustTreeApp {
             .frame(theme::panel(p.mantle, 8, 5))
             .show(ui, |ui| self.toolbar(ui, &mut actions));
 
+        self.git_missing_banner(ui);
+
         egui::Panel::bottom("statusbar")
             .frame(theme::panel(p.crust, 12, 4))
             .show(ui, |ui| self.status_bar(ui));
@@ -1881,6 +2151,7 @@ impl eframe::App for RustTreeApp {
         if self.show_log {
             self.log_window(&ctx);
         }
+        self.about_window(&ctx);
         self.github.dialog_ui(&ctx);
         self.credential_dialog(&ctx);
         self.toast_ui(&ctx);
@@ -1901,6 +2172,7 @@ impl eframe::App for RustTreeApp {
             github_login: self.github.saved_login(),
             github_client_id: self.github.saved_client_id(),
             clone_parent: Some(self.clone_parent.clone()),
+            last_update_check: self.last_update_check,
         };
         eframe::set_value(storage, STORAGE_KEY, &saved);
     }
@@ -1909,6 +2181,29 @@ impl eframe::App for RustTreeApp {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Open THIRD-PARTY-LICENSES.txt shipped next to the program (or the copy in the source tree).
+fn open_licenses(ctx: &egui::Context) {
+    const NAME: &str = "THIRD-PARTY-LICENSES.txt";
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf));
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(d) = &exe_dir {
+        candidates.push(d.join("../Resources").join(NAME)); // macOS .app
+        candidates.push(d.join(NAME)); // Windows / Linux archives
+    }
+    candidates.push(PathBuf::from("/usr/share/doc/foxgit").join(NAME)); // .deb
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join(NAME)); // dev build
+    match candidates.into_iter().find(|p| p.exists()) {
+        Some(p) => tabs::reveal_in_file_manager(&p),
+        None => {
+            if let Some(url) = update::repo_url() {
+                ctx.open_url(egui::OpenUrl::new_tab(format!("{url}/blob/main/{NAME}")));
+            }
+        }
+    }
+}
 
 /// Thin vertical divider between toolbar groups.
 fn toolbar_divider(ui: &mut egui::Ui) {
