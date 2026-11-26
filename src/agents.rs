@@ -546,6 +546,8 @@ pub struct Agents {
     pub opened: Option<(PathBuf, u64)>,
     /// Where agents' worktrees go (`<app data>/worktrees`).
     worktree_root: PathBuf,
+    /// Which agent CLIs are installed (re-checked every few seconds while shown).
+    installed: Option<(Instant, Vec<(AgentKind, bool)>)>,
 }
 
 impl Agents {
@@ -598,6 +600,7 @@ impl Agents {
             ctx: ctx.clone(),
             notes: Vec::new(),
             opened: None,
+            installed: None,
             worktree_root: eframe::storage_dir(crate::APP_NAME)
                 .unwrap_or_else(std::env::temp_dir)
                 .join("worktrees"),
@@ -641,6 +644,86 @@ impl Agents {
                 queued: t.queue.len(),
             })
             .collect()
+    }
+
+    pub fn has(&self, id: u64) -> bool {
+        self.tasks.iter().any(|t| t.id == id)
+    }
+
+    fn installed(&mut self) -> Vec<(AgentKind, bool)> {
+        let stale = self
+            .installed
+            .as_ref()
+            .is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(5));
+        if stale {
+            let found = AgentKind::ALL
+                .iter()
+                .map(|k| (*k, k.find().is_some()))
+                .collect();
+            self.installed = Some((Instant::now(), found));
+        }
+        self.installed
+            .as_ref()
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The Agents view when no chat is open. Returns true when "New chat" is clicked.
+    pub fn empty_view(&mut self, ui: &mut egui::Ui) -> bool {
+        let installed = self.installed();
+        let mut clicked = false;
+        egui::CentralPanel::default().show(ui, |ui| {
+            let p = pal(ui);
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.18).max(20.0));
+                ui.label(RichText::new("✨").size(40.0).color(p.accent_hover));
+                ui.add_space(4.0);
+                ui.label(RichText::new("AI agents").size(22.0).strong().color(p.text_strong));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new("Give a coding task to an agent and chat with it while it works.\nIt uses its own copy of this repository — review its changes, then merge or discard.")
+                        .color(p.subtext),
+                );
+                ui.add_space(16.0);
+                let any = installed.iter().any(|(_, ok)| *ok);
+                if theme::primary_button(ui, "✚  New chat", any).clicked() {
+                    clicked = true;
+                }
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    // centre the row of agents under the button
+                    let w = 3.0 * 150.0;
+                    ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+                    for (k, ok) in &installed {
+                        egui::Frame::new()
+                            .fill(p.surface0)
+                            .stroke(egui::Stroke::new(1.0, p.border))
+                            .corner_radius(10.0)
+                            .inner_margin(egui::Margin::symmetric(12, 10))
+                            .show(ui, |ui| {
+                                ui.set_width(118.0);
+                                ui.vertical_centered(|ui| {
+                                    ui.label(RichText::new(k.name()).strong().color(p.text_strong));
+                                    if *ok {
+                                        ui.label(RichText::new("✔ installed").small().color(p.green));
+                                    } else if ui.link(RichText::new("Install").small()).clicked() {
+                                        ui.ctx().open_url(egui::OpenUrl::new_tab(k.install_url()));
+                                    }
+                                });
+                            });
+                    }
+                });
+                if !installed.iter().any(|(_, ok)| *ok) {
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Install one of these command-line agents, then come back here.")
+                            .small()
+                            .color(p.faint),
+                    );
+                }
+            });
+        });
+        clicked
     }
 
     pub fn mark_merged(&mut self, id: u64) {

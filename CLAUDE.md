@@ -24,7 +24,7 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 | `src/main.rs` | Entry point. First checks `askpass::client_main()` (process started by git as GIT_ASKPASS) before opening any window. |
 | `src/app.rs` | `FoxGitApp` state, `RepoTab` (one per open repo), toolbar, dialogs, background job queue, shortcuts, auto-fetch, credential dialog, persistence (`Saved`). |
 | `src/tabs.rs` | Browser-style tab strip (drag reorder, context menu), Projects launcher page, project list (`Project`, pinned/recent), repo scanner. |
-| `src/views.rs` | Sidebar (branches/remotes/tags/stashes), History view (commit list + graph painting), File Status view (staged/unstaged lists, commit box). |
+| `src/views.rs` | Activity rail (Changes / History / Agents modes = `View`), mode sidebar (branches/remotes/tags/stashes, or the agent chats), History view (commit list + graph painting), File Status view (staged/unstaged lists, commit box). |
 | `src/diffview.rs` | Virtualized diff viewer + hunk/line staging UI. |
 | `src/graph.rs` | Commit-graph lane layout algorithm (pure, unit-tested). |
 | `src/git.rs` | Backend. **Reads** via libgit2 (`Repo`: commits, refs, status, diff). **Writes** via the `git` CLI (`Op` enum → `Op::run`). `FileDiff::build_patch` builds partial patches for `git apply`. |

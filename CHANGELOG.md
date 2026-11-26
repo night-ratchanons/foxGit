@@ -6,7 +6,9 @@ into the GitHub Release notes.
 ## [Unreleased]
 
 ### New: AI agents in FoxGit
-- **AGENTS** in the sidebar → **New agent chat…**: give a task to **Claude Code**, **Codex** or
+- Clear zones: an activity rail on the far left switches between **Changes**, **History** and
+  **Agents**; each mode has its own sidebar (branches/remotes/tags/stashes, or the agent chats).
+- **Agents** → **New chat**: give a task to **Claude Code**, **Codex** or
   **Hermes** (whichever CLIs are installed) and chat with it. Each chat works in its own git
   worktree on an `agent/…` branch, so your folder is never touched.
 - Live progress (what it says, files it edits, commands it runs), Stop, and replies at any time —

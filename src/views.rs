@@ -267,22 +267,9 @@ pub fn sidebar(
                 .auto_shrink(false)
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.add_space(2.0);
-                    let changes = tab.status.staged.len() + tab.status.unstaged.len();
-                    let mut row = SideRow::new(ui, "📝", "File Status");
-                    row.selected = tab.view == View::FileStatus;
-                    row.count = (changes > 0).then_some(changes);
-                    if side_row(ui, row).clicked() {
-                        tab.view = View::FileStatus;
-                    }
-                    let mut row = SideRow::new(ui, "🕘", "History");
-                    row.selected = tab.view == View::History;
-                    if side_row(ui, row).clicked() {
-                        tab.view = View::History;
-                    }
-
-                    if section(ui, "AGENTS", agent_rows.len()) {
-                        agents_section(ui, tab, agent_rows, actions);
+                    if tab.view == View::Agents {
+                        agents_sidebar(ui, tab, agent_rows, actions);
+                        return;
                     }
 
                     let locals = tab.refs.locals.clone();
@@ -434,8 +421,136 @@ pub fn github_logins_id() -> egui::Id {
     egui::Id::unique("github_logins")
 }
 
-/// Chats with AI agents for this repository, plus "New chat…".
-fn agents_section(
+// ---------------------------------------------------------------------------
+// Activity rail: the leftmost zone that switches between Changes, History and Agents
+// ---------------------------------------------------------------------------
+
+pub fn activity_rail(ui: &mut egui::Ui, tab: &mut RepoTab, agent_rows: &[crate::agents::RowInfo]) {
+    use crate::agents::Status;
+    let p = pal(ui);
+    let changes = tab.status.staged.len() + tab.status.unstaged.len();
+    let waiting = agent_rows
+        .iter()
+        .filter(|r| matches!(r.status, Status::Idle | Status::Failed))
+        .count();
+    let running = agent_rows.iter().any(|r| r.status == Status::Running);
+    egui::Panel::left("activity_rail")
+        .resizable(false)
+        .exact_size(56.0)
+        .frame(
+            egui::Frame::new()
+                .fill(p.crust)
+                .inner_margin(egui::Margin::symmetric(6, 8)),
+        )
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
+            let items = [
+                (
+                    View::FileStatus,
+                    "📝",
+                    "Changes",
+                    "Changes — stage, discard and commit",
+                    changes,
+                    false,
+                ),
+                (
+                    View::History,
+                    "🕘",
+                    "History",
+                    "History — commits, branches and diffs",
+                    0,
+                    false,
+                ),
+                (
+                    View::Agents,
+                    "✨",
+                    "Agents",
+                    "AI agents — chat with Claude Code, Codex or Hermes",
+                    waiting,
+                    running,
+                ),
+            ];
+            for (view, icon, label, tip, badge, busy) in items {
+                if rail_button(ui, icon, label, tab.view == view, badge, busy)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    tab.view = view;
+                }
+            }
+        });
+}
+
+fn rail_button(
+    ui: &mut egui::Ui,
+    icon: &str,
+    label: &str,
+    selected: bool,
+    badge: usize,
+    busy: bool,
+) -> egui::Response {
+    let p = pal(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), Sense::click());
+    let painter = ui.painter();
+    if selected {
+        painter.rect_filled(rect, 10.0, p.surface1);
+        painter.rect_filled(
+            Rect::from_min_size(rect.left_top() + vec2(-6.0, 12.0), vec2(3.0, 26.0)),
+            1.5,
+            p.accent,
+        );
+    } else if resp.hovered() {
+        painter.rect_filled(rect, 10.0, p.hover);
+    }
+    let color = if selected {
+        p.accent_hover
+    } else if resp.hovered() {
+        p.text
+    } else {
+        p.subtext
+    };
+    painter.text(
+        rect.center() + vec2(0.0, -7.0),
+        egui::Align2::CENTER_CENTER,
+        icon,
+        FontId::proportional(18.0),
+        color,
+    );
+    painter.text(
+        rect.center() + vec2(0.0, 14.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(10.0),
+        if selected { p.text_strong } else { p.faint },
+    );
+    if badge > 0 {
+        let t = if badge > 99 {
+            "99+".to_string()
+        } else {
+            badge.to_string()
+        };
+        let w = theme::pill_width(painter, &t);
+        theme::paint_pill(
+            painter,
+            rect.right() - w + 2.0,
+            rect.top() + 8.0,
+            &t,
+            p.accent,
+            p.on_accent,
+        );
+    }
+    if busy {
+        let c = rect.left_top() + vec2(10.0, 9.0);
+        painter.circle_filled(c, 4.0, p.accent_hover);
+        painter.circle_stroke(c, 4.0, Stroke::new(1.5, p.crust));
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(500));
+    }
+    resp
+}
+
+/// Sidebar of the Agents zone: "New chat" and this repository's chats, newest first.
+fn agents_sidebar(
     ui: &mut egui::Ui,
     tab: &mut RepoTab,
     rows: &[crate::agents::RowInfo],
@@ -443,45 +558,86 @@ fn agents_section(
 ) {
     use crate::agents::Status;
     let p = pal(ui);
-    for r in rows {
-        let (icon, color) = match r.status {
-            Status::Running => ("⟳", p.accent_hover),
-            Status::Idle => ("●", p.green),
-            Status::Failed => ("⚠", p.red),
-            Status::Stopped => ("●", p.faint),
-            Status::Merged => ("✔", p.purple),
-        };
-        let mut row = SideRow::new(ui, icon, &r.title);
-        row.tree = true;
-        row.icon_color = color;
-        row.selected = tab.view == View::Agent(r.id);
-        if r.queued > 0 {
-            row.chips.push((format!("+{}", r.queued), p.accent_hover));
-        }
-        let tip = format!(
-            "{} · {}",
-            r.kind.name(),
-            match r.status {
-                Status::Running => "working",
-                Status::Idle => "waiting for your reply",
-                Status::Failed => "stopped with an error",
-                Status::Stopped => "stopped",
-                Status::Merged => "merged",
-            }
-        );
-        if side_row(ui, row).on_hover_text(tip).clicked() {
-            tab.view = View::Agent(r.id);
-        }
-    }
-    let mut row = SideRow::new(ui, "✨", "New agent chat…");
-    row.tree = true;
-    row.icon_color = p.accent_hover;
-    row.label_color = p.subtext;
-    if side_row(ui, row)
+    ui.add_space(6.0);
+    ui.label(RichText::new("AGENT CHATS").small().color(p.faint));
+    ui.add_space(6.0);
+    let w = ui.available_width();
+    if ui
+        .add_sized(
+            [w, 32.0],
+            egui::Button::new(RichText::new("✚  New chat").strong().color(p.on_accent))
+                .fill(p.accent)
+                .stroke(Stroke::NONE),
+        )
         .on_hover_text("Ask Claude Code, Codex or Hermes to work on this repository")
         .clicked()
     {
         actions.push(Action::NewAgentTask);
+    }
+    ui.add_space(8.0);
+    if rows.is_empty() {
+        ui.label(RichText::new("No chats yet.").color(p.faint));
+        return;
+    }
+    for r in rows {
+        let (icon, color, state) = match r.status {
+            Status::Running => ("⟳", p.accent_hover, "working…"),
+            Status::Idle => ("●", p.green, "waiting for you"),
+            Status::Failed => ("⚠", p.red, "stopped with an error"),
+            Status::Stopped => ("●", p.faint, "stopped"),
+            Status::Merged => ("✔", p.purple, "merged"),
+        };
+        let selected = tab.agent_chat == Some(r.id);
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+        let painter = ui.painter();
+        if selected {
+            painter.rect_filled(rect, 8.0, p.selection);
+            painter.rect_filled(
+                Rect::from_min_size(rect.left_top() + vec2(0.0, 8.0), vec2(3.0, 28.0)),
+                1.5,
+                p.accent,
+            );
+        } else if resp.hovered() {
+            painter.rect_filled(rect, 8.0, p.hover);
+        }
+        painter.text(
+            pos2(rect.left() + 16.0, rect.top() + 15.0),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            FontId::proportional(12.0),
+            color,
+        );
+        let clip = Rect::from_min_max(
+            pos2(rect.left() + 28.0, rect.top()),
+            pos2(rect.right() - 6.0, rect.bottom()),
+        );
+        let tp = painter.with_clip_rect(clip.intersect(ui.clip_rect()));
+        tp.text(
+            pos2(rect.left() + 28.0, rect.top() + 15.0),
+            egui::Align2::LEFT_CENTER,
+            &r.title,
+            FontId::proportional(13.0),
+            if selected { p.sel_text } else { p.text_strong },
+        );
+        let mut sub = format!("{} · {state}", r.kind.name());
+        if r.queued > 0 {
+            sub.push_str(&format!(" · {} queued", r.queued));
+        }
+        tp.text(
+            pos2(rect.left() + 28.0, rect.top() + 32.0),
+            egui::Align2::LEFT_CENTER,
+            sub,
+            FontId::proportional(11.0),
+            if r.status == Status::Failed {
+                p.red
+            } else {
+                p.faint
+            },
+        );
+        if resp.on_hover_text(&r.title).clicked() {
+            tab.agent_chat = Some(r.id);
+        }
+        ui.add_space(2.0);
     }
 }
 

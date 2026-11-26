@@ -23,8 +23,8 @@ pub const DEFAULT_COMMIT_LIMIT: usize = 3000;
 pub enum View {
     FileStatus,
     History,
-    /// Chat with an AI agent task (id in `FoxGitApp::agents`).
-    Agent(u64),
+    /// AI agent chats (the open chat is `RepoTab::agent_chat`).
+    Agents,
 }
 
 type HistoryResult = Result<(Vec<CommitInfo>, Vec<GraphRow>), String>;
@@ -36,6 +36,8 @@ pub struct RepoTab {
     pub path: PathBuf,
     pub name: String,
     pub view: View,
+    /// The agent chat shown in the Agents view.
+    pub agent_chat: Option<u64>,
 
     pub commits: Vec<CommitInfo>,
     pub graph: Vec<GraphRow>,
@@ -81,6 +83,7 @@ impl RepoTab {
             path,
             name,
             view: View::History,
+            agent_chat: None,
             commits: Vec::new(),
             graph: Vec::new(),
             graph_lanes: 1,
@@ -901,8 +904,8 @@ impl FoxGitApp {
                 Some(AfterJob::AgentDiscarded(id)) if done.ok => {
                     self.agents.remove(id);
                     for t in &mut self.tabs {
-                        if t.view == View::Agent(id) {
-                            t.view = View::History;
+                        if t.agent_chat == Some(id) {
+                            t.agent_chat = None;
                         }
                     }
                 }
@@ -2670,20 +2673,30 @@ impl eframe::App for FoxGitApp {
             let active = self.active;
             let agent_rows = self.agents.rows_for(&self.tabs[active].path);
             let tab = &mut self.tabs[active];
+            // three zones: mode rail · mode sidebar · work area
+            views::activity_rail(ui, tab, &agent_rows);
             views::sidebar(ui, tab, &agent_rows, &mut actions);
             match tab.view {
                 View::History => views::history_view(ui, tab, &mut actions),
                 View::FileStatus => views::file_status_view(ui, tab, &mut actions),
-                View::Agent(id) => {
-                    let acts = self.agents.task_view(ui, id);
-                    self.apply_agent_actions(acts);
-                }
+                View::Agents => match tab.agent_chat.filter(|id| self.agents.has(*id)) {
+                    Some(id) => {
+                        let acts = self.agents.task_view(ui, id);
+                        self.apply_agent_actions(acts);
+                    }
+                    None => {
+                        if self.agents.empty_view(ui) {
+                            actions.push(Action::NewAgentTask);
+                        }
+                    }
+                },
             }
         }
         // a chat started from the New task dialog: show it in its repository's tab
         if let Some((repo, id)) = self.agents.opened.take() {
             if let Some(i) = self.tabs.iter().position(|t| t.path == repo) {
-                self.tabs[i].view = View::Agent(id);
+                self.tabs[i].view = View::Agents;
+                self.tabs[i].agent_chat = Some(id);
                 self.select_tab(i);
             }
         }
