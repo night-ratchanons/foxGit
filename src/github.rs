@@ -74,13 +74,28 @@ fn net(e: ureq::Error) -> ApiError {
 }
 
 fn api_get(token: &str, path: &str) -> Result<String, ApiError> {
-    let mut r = agent()
-        .get(&format!("{API}{path}"))
-        .header("Authorization", &format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .call()
-        .map_err(net)?;
+    api(token, path, None)
+}
+
+/// GET (`body` = None) or POST a JSON body to the GitHub REST API.
+fn api(token: &str, path: &str, body: Option<serde_json::Value>) -> Result<String, ApiError> {
+    let url = format!("{API}{path}");
+    let auth = format!("Bearer {token}");
+    let res = match body {
+        None => agent()
+            .get(&url)
+            .header("Authorization", &auth)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .call(),
+        Some(json) => agent()
+            .post(&url)
+            .header("Authorization", &auth)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send_json(json),
+    };
+    let mut r = res.map_err(net)?;
     let status = r.status().as_u16();
     let body = r
         .body_mut()
@@ -89,16 +104,81 @@ fn api_get(token: &str, path: &str) -> Result<String, ApiError> {
     if (200..300).contains(&status) {
         return Ok(body);
     }
-    let msg = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v["message"].as_str().map(String::from))
-        .unwrap_or_else(|| body.chars().take(200).collect());
     Err(match status {
         401 => ApiError::Auth(
             "GitHub rejected the token (401) — it may have expired or been revoked".into(),
         ),
-        _ => ApiError::Other(format!("GitHub API error {status}: {msg}")),
+        _ => ApiError::Other(format!("GitHub: {} (HTTP {status})", error_message(&body))),
     })
+}
+
+/// The human part of a GitHub error response, e.g. "name already exists on this account".
+fn error_message(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.chars().take(200).collect();
+    };
+    let detail: Vec<&str> = v["errors"]
+        .as_array()
+        .map(|errs| errs.iter().filter_map(|e| e["message"].as_str()).collect())
+        .unwrap_or_default();
+    let msg = v["message"].as_str().unwrap_or("request failed");
+    if detail.is_empty() {
+        msg.to_string()
+    } else {
+        format!("{msg}: {}", detail.join("; "))
+    }
+}
+
+/// Organizations the account belongs to (where it may be able to create repositories).
+pub fn list_orgs(token: &str) -> Result<Vec<String>, ApiError> {
+    #[derive(Deserialize)]
+    struct Org {
+        login: String,
+    }
+    let body = api_get(token, "/user/orgs?per_page=100")?;
+    let orgs: Vec<Org> = serde_json::from_str(&body).map_err(|e| ApiError::Other(e.to_string()))?;
+    Ok(orgs.into_iter().map(|o| o.login).collect())
+}
+
+/// Create an empty repository for the user (`org` = None) or in an organization.
+pub fn create_repo(
+    token: &str,
+    org: Option<&str>,
+    name: &str,
+    description: &str,
+    private: bool,
+) -> Result<GhRepo, ApiError> {
+    let path = match org {
+        Some(o) => format!("/orgs/{o}/repos"),
+        None => "/user/repos".to_string(),
+    };
+    let body = api(
+        token,
+        &path,
+        Some(serde_json::json!({
+            "name": name,
+            "description": description,
+            "private": private,
+            "auto_init": false,
+        })),
+    )?;
+    serde_json::from_str(&body).map_err(|e| ApiError::Other(e.to_string()))
+}
+
+/// A repository name GitHub accepts: letters, digits, `-`, `_` and `.` (other characters become `-`).
+pub fn sanitize_repo_name(name: &str) -> String {
+    let s: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    s.trim_matches('-').to_string()
 }
 
 /// The account a token belongs to.
@@ -226,6 +306,19 @@ pub fn repo_slug(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_names_and_errors() {
+        assert_eq!(sanitize_repo_name(" my app (v2) "), "my-app--v2");
+        assert_eq!(sanitize_repo_name("foxgit"), "foxgit");
+        assert_eq!(
+            error_message(
+                r#"{"message":"Repository creation failed.","errors":[{"message":"name already exists on this account"}]}"#
+            ),
+            "Repository creation failed.: name already exists on this account"
+        );
+        assert_eq!(error_message(r#"{"message":"Not Found"}"#), "Not Found");
+    }
 
     #[test]
     fn slugs() {

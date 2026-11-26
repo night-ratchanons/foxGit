@@ -34,6 +34,11 @@ enum Msg {
         keychain: Result<(), String>,
     },
     Repos(Result<Vec<GhRepo>, ApiError>),
+    Orgs(Result<Vec<String>, ApiError>),
+    Created {
+        tag: u64,
+        result: Result<GhRepo, ApiError>,
+    },
 }
 
 /// State of the "Connect GitHub" dialog.
@@ -70,6 +75,9 @@ pub struct GitHub {
     /// `owner/name` → local project path, so known repositories show "Open" instead of "Clone".
     local: Option<HashMap<String, String>>,
     notes: Vec<(String, bool)>,
+    orgs: Option<Vec<String>>,
+    orgs_loading: bool,
+    created: Vec<(u64, Result<GhRepo, String>)>,
 }
 
 impl GitHub {
@@ -88,6 +96,9 @@ impl GitHub {
             ctx: ctx.clone(),
             local: None,
             notes: Vec::new(),
+            orgs: None,
+            orgs_loading: false,
+            created: Vec::new(),
         };
         if let Some(login) = login {
             // The keychain may show a system prompt: never do this on the UI thread.
@@ -124,9 +135,56 @@ impl GitHub {
         self.local = None;
     }
 
+    pub fn login(&self) -> Option<&str> {
+        self.account.as_ref().map(|a| a.login.as_str())
+    }
+
+    /// Where a new repository can be created: the account itself first, then its
+    /// organizations (loaded in the background on first use).
+    pub fn owners(&mut self) -> Vec<String> {
+        let Some(a) = &self.account else {
+            return Vec::new();
+        };
+        if self.orgs.is_none() && !self.orgs_loading {
+            self.orgs_loading = true;
+            let token = a.token.clone();
+            self.spawn(move |_| Some(Msg::Orgs(github::list_orgs(&token))));
+        }
+        let mut v = vec![a.login.clone()];
+        v.extend(self.orgs.clone().unwrap_or_default());
+        v
+    }
+
+    /// Create an empty repository on GitHub; the result comes back from [`Self::take_created`].
+    pub fn create_repo(
+        &mut self,
+        tag: u64,
+        owner: &str,
+        name: String,
+        description: String,
+        private: bool,
+    ) {
+        let Some(a) = &self.account else {
+            self.created
+                .push((tag, Err("Not connected to GitHub".into())));
+            return;
+        };
+        let token = a.token.clone();
+        let org = (owner != a.login).then(|| owner.to_string());
+        self.spawn(move |_| {
+            let result = github::create_repo(&token, org.as_deref(), &name, &description, private);
+            Some(Msg::Created { tag, result })
+        });
+    }
+
+    pub fn take_created(&mut self) -> Vec<(u64, Result<GhRepo, String>)> {
+        std::mem::take(&mut self.created)
+    }
+
     fn set_account(&mut self, a: Account) {
         github::set_git_credential(Some((a.login.clone(), a.token.clone())));
         self.account = Some(a);
+        self.orgs = None;
         self.repos.clear();
         self.repos_loaded = false;
         self.repos_error = None;
@@ -263,6 +321,18 @@ impl GitHub {
                         }
                     }
                 },
+                Msg::Orgs(res) => {
+                    self.orgs_loading = false;
+                    self.orgs = Some(res.unwrap_or_default());
+                }
+                Msg::Created { tag, result } => {
+                    if result.is_ok() {
+                        // the new repository should show up on the Remote page
+                        self.repos_loaded = false;
+                        self.local = None;
+                    }
+                    self.created.push((tag, result.map_err(|e| e.to_string())));
+                }
                 Msg::Repos(res) => {
                     self.repos_loading = false;
                     if self.account.is_none() {

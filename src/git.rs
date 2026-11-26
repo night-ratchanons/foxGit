@@ -85,6 +85,8 @@ pub struct Refs {
     pub locals: Vec<LocalBranch>,
     pub remotes: Vec<RemoteBranch>,
     pub remote_names: Vec<String>,
+    /// Fetch URL of each remote (by name).
+    pub remote_urls: HashMap<String, String>,
     pub tags: Vec<(String, Oid)>,
     pub stashes: Vec<StashInfo>,
     pub labels: HashMap<Oid, Vec<RefLabel>>,
@@ -445,6 +447,16 @@ impl Repo {
                 .flatten()
                 .map(|s| s.to_string())
                 .collect();
+        }
+        for name in &refs.remote_names {
+            if let Some(url) = self
+                .repo
+                .find_remote(name)
+                .ok()
+                .and_then(|r| r.url().ok().map(String::from))
+            {
+                refs.remote_urls.insert(name.clone(), url);
+            }
         }
 
         let mut tags = Vec::new();
@@ -831,6 +843,8 @@ pub enum Op {
         message: String,
         amend: bool,
         push: bool,
+        /// Push with `-u <remote> <branch>` (the branch has no upstream yet).
+        upstream: Option<(String, String)>,
     },
     Checkout(String),
     CheckoutRemote {
@@ -873,6 +887,18 @@ pub enum Op {
     Revert(String),
     CherryPick(String),
     AbortMerge,
+    RemoteAdd {
+        name: String,
+        url: String,
+        fetch: bool,
+    },
+    /// Rename and/or change the URL of a remote.
+    RemoteEdit {
+        name: String,
+        new_name: Option<String>,
+        url: Option<String>,
+    },
+    RemoteRemove(String),
     /// Stage / unstage / discard part of a file (hunks or individual lines).
     ApplyPatch {
         patch: Vec<u8>,
@@ -914,6 +940,9 @@ impl Op {
             Op::Revert(c) => format!("Revert {}", &c[..7.min(c.len())]),
             Op::CherryPick(c) => format!("Cherry-pick {}", &c[..7.min(c.len())]),
             Op::AbortMerge => "Abort merge".into(),
+            Op::RemoteAdd { name, .. } => format!("Add remote {name}"),
+            Op::RemoteEdit { name, .. } => format!("Edit remote {name}"),
+            Op::RemoteRemove(name) => format!("Remove remote {name}"),
             Op::ApplyPatch { label, .. } => label.clone(),
         }
     }
@@ -959,6 +988,7 @@ impl Op {
                 message,
                 amend,
                 push,
+                upstream,
             } => {
                 let mut c = s(&["commit", "-F", "-"]);
                 if *amend {
@@ -966,7 +996,13 @@ impl Op {
                 }
                 let mut v = vec![(c, Some(message.clone().into_bytes()))];
                 if *push {
-                    v.push((s(&["push"]), None));
+                    v.push((
+                        match upstream {
+                            Some((remote, branch)) => s(&["push", "-u", remote, branch]),
+                            None => s(&["push"]),
+                        },
+                        None,
+                    ));
                 }
                 v
             }
@@ -1038,6 +1074,30 @@ impl Op {
             Op::Revert(c) => vec![(s(&["revert", "--no-edit", c]), None)],
             Op::CherryPick(c) => vec![(s(&["cherry-pick", c]), None)],
             Op::AbortMerge => vec![(s(&["merge", "--abort"]), None)],
+            Op::RemoteAdd { name, url, fetch } => {
+                let mut v = vec![(s(&["remote", "add", name, url]), None)];
+                if *fetch {
+                    v.push((s(&["fetch", name]), None));
+                }
+                v
+            }
+            Op::RemoteEdit {
+                name,
+                new_name,
+                url,
+            } => {
+                let mut v = Vec::new();
+                let mut current = name.clone();
+                if let Some(n) = new_name.as_ref().filter(|n| *n != name) {
+                    v.push((s(&["remote", "rename", name, n]), None));
+                    current = n.clone();
+                }
+                if let Some(u) = url {
+                    v.push((s(&["remote", "set-url", &current, u]), None));
+                }
+                v
+            }
+            Op::RemoteRemove(name) => vec![(s(&["remote", "remove", name]), None)],
             Op::ApplyPatch {
                 patch,
                 cached,
@@ -1197,6 +1257,7 @@ mod tests {
             message: "change two\n".into(),
             amend: false,
             push: false,
+            upstream: None,
         }
         .run(d);
         assert!(out.ok, "{}", out.text);
@@ -1368,6 +1429,58 @@ mod tests {
         );
         let staged_blob = git_out(d, &["show", ":w.txt"]);
         assert_eq!(staged_blob, "a\r\nB\r\nc2");
+    }
+
+    #[test]
+    fn remotes_add_edit_remove_and_first_push() {
+        let t = setup();
+        let d = t.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        let url = bare.path().display().to_string();
+        let add = Op::RemoteAdd {
+            name: "origin".into(),
+            url: url.clone(),
+            fetch: true,
+        }
+        .run(d);
+        assert!(add.ok, "{}", add.text);
+        let mut repo = Repo::open(d).unwrap();
+        let refs = repo.refs().unwrap();
+        assert_eq!(refs.remote_names, ["origin"]);
+        assert_eq!(refs.remote_urls["origin"], url);
+
+        // Commit & Push on a branch without upstream sets it up
+        fs::write(d.join("c.txt"), "c\n").unwrap();
+        git(d, &["add", "c.txt"]);
+        let out = Op::Commit {
+            message: "add c\n".into(),
+            amend: false,
+            push: true,
+            upstream: Some(("origin".into(), "main".into())),
+        }
+        .run(d);
+        assert!(out.ok, "{}", out.text);
+        let up = git_out(d, &["rev-parse", "--abbrev-ref", "main@{upstream}"]);
+        assert_eq!(up.trim(), "origin/main");
+
+        let other = tempfile::tempdir().unwrap();
+        git(other.path(), &["init", "-q", "--bare"]);
+        let url2 = other.path().display().to_string();
+        let edit = Op::RemoteEdit {
+            name: "origin".into(),
+            new_name: Some("github".into()),
+            url: Some(url2.clone()),
+        }
+        .run(d);
+        assert!(edit.ok, "{}", edit.text);
+        let refs = repo.refs().unwrap();
+        assert_eq!(refs.remote_names, ["github"]);
+        assert_eq!(refs.remote_urls["github"], url2);
+
+        let rm = Op::RemoteRemove("github".into()).run(d);
+        assert!(rm.ok, "{}", rm.text);
+        assert!(repo.refs().unwrap().remote_names.is_empty());
     }
 
     #[test]

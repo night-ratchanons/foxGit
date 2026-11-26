@@ -42,6 +42,7 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | **File Status** | stage / unstage / discard ทีละไฟล์ **ทีละ hunk หรือทีละบรรทัด** (คลิกหรือลากเลือกบรรทัด + / −) รองรับ CRLF, ไฟล์ไม่มี newline ท้ายไฟล์, encoding ที่ไม่ใช่ UTF-8 และชื่อไฟล์ภาษาไทย |
 | **Commit** | Amend, "Commit & Push" ทีเดียว, ⌘/Ctrl + Enter |
 | **Branch / Remote** | สร้าง, checkout, merge, rebase, ลบ, push (ตั้ง upstream / force-with-lease), pull (merge/rebase), fetch, clone, auto-fetch ทุกแท็บใน background |
+| **ตั้ง remote ทีหลัง** | repo ที่สร้างในเครื่อง (`git init`) กด **Add remote…** ใน sidebar แล้วใส่ URL หรือเลือก **Create on GitHub** ให้สร้าง repo บน GitHub แล้วผูก + push ให้ในขั้นตอนเดียว คลิกขวาที่ remote เพื่อแก้ชื่อ/URL หรือลบ |
 | **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
 | **บัญชี GitHub** | กด **Sign in** แล้ววาง Personal Access Token (มีลิงก์สร้าง token ที่ติ๊กสิทธิ์ให้แล้ว) เก็บใน Keychain ของระบบ push/pull ไป github.com ไม่ต้องใส่รหัสอีก |
 | **Clone จาก GitHub** | หน้า **Projects → Remote** แสดง repo ทั้งหมดที่บัญชีมีสิทธิ์ (ของตัวเอง, org, ที่เป็น collaborator) ค้นหาแล้วกด Clone ได้เลย |

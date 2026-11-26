@@ -13,6 +13,8 @@ First public release.
 - Commit graph with branch / remote / tag badges, search, and resizable columns.
 - Branches grouped into folders by their `/` prefix (`feature/…`, `fix/…`), local and remote.
 - Stage, unstage and discard whole files, single hunks or individual lines.
+- Remotes: add one to a repository created locally (or create a new GitHub repository for it
+  in one step), edit its name / URL, remove it; Commit & Push sets the upstream on the first push.
 - GitHub account: connect with a personal access token; it is kept in the system keychain and
   used automatically for HTTPS remotes on github.com.
 - Projects → Remote: every repository your GitHub account can access, with one-click Clone.

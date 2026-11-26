@@ -3,6 +3,7 @@
 use crate::account::{GitHub, MenuAction, RemoteEvent};
 use crate::askpass::{self, AskRequest};
 use crate::git::{self, CommitInfo, DiffTarget, FileChange, FileDiff, Op, Refs, Repo, WorkStatus};
+use crate::github;
 use crate::graph::{self, GraphRow};
 use crate::tabs::{self, LauncherEvent, LauncherMode, LauncherState, Project, TabEvent, TabInfo};
 use crate::theme;
@@ -330,6 +331,42 @@ pub enum Dialog {
         op: Op,
         danger: bool,
     },
+    AddRemote {
+        name: String,
+        url: String,
+        fetch: bool,
+        /// Create a new repository on GitHub instead of typing a URL.
+        github: bool,
+        form: PublishForm,
+    },
+    EditRemote {
+        original: String,
+        name: String,
+        url: String,
+    },
+}
+
+/// "Create on GitHub" part of the Add remote dialog.
+pub struct PublishForm {
+    pub owner: String,
+    pub repo: String,
+    pub description: String,
+    pub private: bool,
+    /// Push the current branch once the remote is added.
+    pub push: bool,
+    pub branch: Option<String>,
+    /// Waiting for GitHub (request tag).
+    pub busy: Option<u64>,
+    pub error: Option<String>,
+}
+
+/// A repository being created on GitHub for a tab.
+struct PendingPublish {
+    tag: u64,
+    tab_id: u64,
+    dir: PathBuf,
+    remote: String,
+    push_branch: Option<String>,
 }
 
 /// Things the UI asks the app to do (collected during a frame, applied afterwards).
@@ -338,6 +375,10 @@ pub enum Action {
     Dialog(Dialog),
     Refresh,
     LoadMore,
+    /// Open the Add remote dialog for the active tab.
+    AddRemote,
+    /// Open the Edit remote dialog.
+    EditRemote(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +474,8 @@ pub struct FoxGitApp {
     update: Option<Release>,
     update_rx: Option<Receiver<update::CheckResult>>,
     last_update_check: i64,
+    publish: Option<PendingPublish>,
+    next_tag: u64,
 }
 
 impl FoxGitApp {
@@ -505,6 +548,8 @@ impl FoxGitApp {
             update: None,
             update_rx: None,
             last_update_check: saved.last_update_check,
+            publish: None,
+            next_tag: 1,
         };
         app.apply_theme(&cc.egui_ctx);
         app.start_git_check(&cc.egui_ctx);
@@ -858,11 +903,110 @@ impl FoxGitApp {
                         tab.start_history_load(Some(ctx));
                     }
                 }
+                Action::AddRemote => self.open_add_remote(),
+                Action::EditRemote(name) => {
+                    if let Some(tab) = self.tabs.get(self.active) {
+                        let url = tab.refs.remote_urls.get(&name).cloned().unwrap_or_default();
+                        self.dialog = Some(Dialog::EditRemote {
+                            original: name.clone(),
+                            name,
+                            url,
+                        });
+                    }
+                }
                 Action::LoadMore => {
                     if let Some(tab) = self.tabs.get_mut(self.active) {
                         tab.commit_limit *= 2;
                         tab.start_history_load(Some(ctx));
                     }
+                }
+            }
+        }
+    }
+
+    fn open_add_remote(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let taken = &tab.refs.remote_names;
+        let name = ["origin", "upstream", "github"]
+            .into_iter()
+            .find(|n| !taken.iter().any(|t| t == n))
+            .unwrap_or("remote")
+            .to_string();
+        let branch = (!tab.repo.is_head_unborn())
+            .then(|| tab.refs.head_name.clone())
+            .flatten()
+            .filter(|_| !tab.refs.head_detached);
+        self.dialog = Some(Dialog::AddRemote {
+            name,
+            url: String::new(),
+            fetch: true,
+            github: self.github.login().is_some(),
+            form: PublishForm {
+                owner: self.github.login().unwrap_or_default().to_string(),
+                repo: github::sanitize_repo_name(&tab.name),
+                description: String::new(),
+                private: true,
+                push: branch.is_some(),
+                branch,
+                busy: None,
+                error: None,
+            },
+        });
+    }
+
+    /// A "Create on GitHub" request finished: add the remote (and push) or show the error.
+    fn poll_publish(&mut self) {
+        for (tag, res) in self.github.take_created() {
+            let Some(p) = self.publish.take_if(|p| p.tag == tag) else {
+                continue;
+            };
+            match res {
+                Ok(repo) => {
+                    self.enqueue(
+                        Some(p.tab_id),
+                        p.dir.clone(),
+                        JobKind::Op(Op::RemoteAdd {
+                            name: p.remote.clone(),
+                            url: repo.clone_url.clone(),
+                            fetch: false,
+                        }),
+                    );
+                    if let Some(branch) = p.push_branch {
+                        self.enqueue(
+                            Some(p.tab_id),
+                            p.dir.clone(),
+                            JobKind::Op(Op::Push {
+                                set_upstream: Some((p.remote.clone(), branch)),
+                                force: false,
+                            }),
+                        );
+                    }
+                    if matches!(&self.dialog, Some(Dialog::AddRemote { form, .. }) if form.busy == Some(tag))
+                    {
+                        self.dialog = None;
+                    }
+                    self.notify(
+                        format!(
+                            "Created {} on GitHub and added it as '{}'",
+                            repo.full_name, p.remote
+                        ),
+                        true,
+                    );
+                }
+                Err(e) => {
+                    if let Some(Dialog::AddRemote { form, .. }) = &mut self.dialog {
+                        if form.busy == Some(tag) {
+                            form.busy = None;
+                            form.error = Some(e);
+                            continue;
+                        }
+                    }
+                    self.notify(
+                        format!("Could not create the GitHub repository: {e}"),
+                        false,
+                    );
                 }
             }
         }
@@ -917,6 +1061,16 @@ impl FoxGitApp {
                 if ui.button("New repository (git init)…").clicked() {
                     ui.close();
                     self.init_folder();
+                }
+                if ui
+                    .add_enabled(
+                        !self.tabs.is_empty() && !self.show_launcher,
+                        egui::Button::new("Add remote…"),
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                    self.open_add_remote();
                 }
                 if ui
                     .button(format!("Projects…   ({})", theme::shortcut("T")))
@@ -1721,6 +1875,24 @@ impl FoxGitApp {
         let mut keep = true;
         let mut run: Option<Op> = None;
         let mut clone: Option<(String, PathBuf, String)> = None;
+        let mut publish = false;
+        let signed_in = self.github.login().is_some();
+        let owners = if matches!(&dialog, Dialog::AddRemote { github: true, .. }) {
+            self.github.owners()
+        } else {
+            Vec::new()
+        };
+        let remote_names: Vec<String> = self
+            .tabs
+            .get(self.active)
+            .map(|t| t.refs.remote_names.clone())
+            .unwrap_or_default();
+        let valid_remote_name = |n: &str, except: Option<&str>| {
+            let n = n.trim();
+            !n.is_empty()
+                && !n.contains(char::is_whitespace)
+                && (Some(n) == except || !remote_names.iter().any(|r| r == n))
+        };
 
         let title = match &dialog {
             Dialog::NewBranch { .. } => "New branch",
@@ -1730,6 +1902,8 @@ impl FoxGitApp {
             Dialog::Stash { .. } => "Stash changes",
             Dialog::Clone { .. } => "Clone repository",
             Dialog::Confirm { title, .. } => title.as_str(),
+            Dialog::AddRemote { .. } => "Add remote",
+            Dialog::EditRemote { .. } => "Edit remote",
         }
         .to_string();
 
@@ -1843,6 +2017,129 @@ impl FoxGitApp {
                         ui.label(text.as_str());
                         ok_label = if *danger { "Yes, do it" } else { "OK" };
                     }
+                    Dialog::AddRemote {
+                        name,
+                        url,
+                        fetch,
+                        github,
+                        form,
+                    } => {
+                        if signed_in {
+                            let mut idx = usize::from(*github);
+                            if theme::segmented(ui, &["Enter a URL", "Create on GitHub"], &mut idx) {
+                                *github = idx == 1;
+                            }
+                            ui.add_space(8.0);
+                        }
+                        if !*github {
+                            ui.label("Remote name:");
+                            ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                            ui.label("URL:");
+                            ui.add(
+                                egui::TextEdit::singleline(url)
+                                    .hint_text("https://github.com/user/repo.git  or  git@github.com:user/repo.git")
+                                    .desired_width(f32::INFINITY),
+                            )
+                            .request_focus();
+                            ui.checkbox(fetch, "Fetch from it after adding");
+                            if !signed_in {
+                                ui.label(
+                                    RichText::new("Connect GitHub (Sign in, top right) to create the repository from here.")
+                                        .small()
+                                        .weak(),
+                                );
+                            }
+                            ok_label = "Add remote";
+                            ok_enabled = valid_remote_name(name, None) && !url.trim().is_empty();
+                        } else {
+                            let busy = form.busy.is_some();
+                            ui.add_enabled_ui(!busy, |ui| {
+                                egui::Grid::new("publish_grid")
+                                    .num_columns(2)
+                                    .spacing([10.0, 8.0])
+                                    .show(ui, |ui| {
+                                        ui.label("Owner:");
+                                        egui::ComboBox::from_id_salt("publish_owner")
+                                            .selected_text(form.owner.as_str())
+                                            .width(260.0)
+                                            .show_ui(ui, |ui| {
+                                                for o in &owners {
+                                                    ui.selectable_value(&mut form.owner, o.clone(), o);
+                                                }
+                                            });
+                                        ui.end_row();
+                                        ui.label("Repository:");
+                                        let r = ui.add(
+                                            egui::TextEdit::singleline(&mut form.repo).desired_width(260.0),
+                                        );
+                                        if r.lost_focus() {
+                                            form.repo = github::sanitize_repo_name(&form.repo);
+                                        }
+                                        ui.end_row();
+                                        ui.label("Description:");
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut form.description)
+                                                .hint_text("optional")
+                                                .desired_width(260.0),
+                                        );
+                                        ui.end_row();
+                                        ui.label("Remote name:");
+                                        ui.add(egui::TextEdit::singleline(name).desired_width(260.0));
+                                        ui.end_row();
+                                    });
+                                ui.add_space(4.0);
+                                ui.checkbox(&mut form.private, "Private repository");
+                                match &form.branch {
+                                    Some(b) => {
+                                        ui.checkbox(&mut form.push, format!("Push {b} after creating"));
+                                    }
+                                    None => {
+                                        ui.label(
+                                            RichText::new("Nothing to push yet — make a first commit, then Push.")
+                                                .small()
+                                                .weak(),
+                                        );
+                                    }
+                                }
+                            });
+                            if busy {
+                                ui.horizontal(|ui| {
+                                    ui.add(egui::Spinner::new().size(14.0));
+                                    ui.label(RichText::new("Creating the repository on GitHub…").weak());
+                                });
+                            }
+                            if let Some(e) = &form.error {
+                                ui.label(RichText::new(e.as_str()).color(theme::pal(ui).red));
+                                ui.label(
+                                    RichText::new(
+                                        "Creating repositories needs a classic token with the repo scope, \
+                                         or a fine-grained token with Administration: Read and write.",
+                                    )
+                                    .small()
+                                    .weak(),
+                                );
+                            }
+                            ok_label = "Create & add remote";
+                            ok_enabled = !busy
+                                && valid_remote_name(name, None)
+                                && !github::sanitize_repo_name(&form.repo).is_empty()
+                                && !form.owner.is_empty();
+                        }
+                    }
+                    Dialog::EditRemote {
+                        original,
+                        name,
+                        url,
+                    } => {
+                        ui.label("Remote name:");
+                        ui.add(egui::TextEdit::singleline(name).desired_width(f32::INFINITY));
+                        ui.label("URL:");
+                        ui.add(egui::TextEdit::singleline(url).desired_width(f32::INFINITY))
+                            .request_focus();
+                        ok_label = "Save";
+                        ok_enabled =
+                            valid_remote_name(name, Some(original.as_str())) && !url.trim().is_empty();
+                    }
                 }
 
                 ui.add_space(12.0);
@@ -1899,6 +2196,35 @@ impl FoxGitApp {
                                 ))
                             }
                             Dialog::Confirm { op, .. } => run = Some(op.clone()),
+                            Dialog::AddRemote {
+                                name,
+                                url,
+                                fetch,
+                                github,
+                                ..
+                            } => {
+                                if *github {
+                                    publish = true;
+                                } else {
+                                    run = Some(Op::RemoteAdd {
+                                        name: name.trim().into(),
+                                        url: url.trim().into(),
+                                        fetch: *fetch,
+                                    })
+                                }
+                            }
+                            Dialog::EditRemote {
+                                original,
+                                name,
+                                url,
+                            } => {
+                                run = Some(Op::RemoteEdit {
+                                    name: original.clone(),
+                                    new_name: Some(name.trim().to_string())
+                                        .filter(|n| n != original),
+                                    url: Some(url.trim().to_string()),
+                                })
+                            }
                         }
                     }
                     if ui
@@ -1917,6 +2243,31 @@ impl FoxGitApp {
                 self.enqueue(Some(id), dir, JobKind::Op(op));
             }
             keep = false;
+        }
+        if publish {
+            if let (Dialog::AddRemote { name, form, .. }, Some(tab)) =
+                (&mut dialog, self.tabs.get(self.active))
+            {
+                let tag = self.next_tag;
+                self.next_tag += 1;
+                form.busy = Some(tag);
+                form.error = None;
+                self.publish = Some(PendingPublish {
+                    tag,
+                    tab_id: tab.id,
+                    dir: tab.path.clone(),
+                    remote: name.trim().to_string(),
+                    push_branch: form.branch.clone().filter(|_| form.push),
+                });
+                let repo = github::sanitize_repo_name(&form.repo);
+                self.github.create_repo(
+                    tag,
+                    &form.owner.clone(),
+                    repo,
+                    form.description.trim().to_string(),
+                    form.private,
+                );
+            }
         }
         if let Some((url, parent, name)) = clone {
             self.clone_parent = parent.display().to_string();
@@ -2081,6 +2432,7 @@ impl eframe::App for FoxGitApp {
             self.notify(text, ok);
         }
         self.poll_checks();
+        self.poll_publish();
         if self.auto_fetch_min > 0 {
             let every = Duration::from_secs(self.auto_fetch_min as u64 * 60);
             let since = self.last_auto_fetch.elapsed();

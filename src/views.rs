@@ -290,9 +290,6 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                     let remotes = tab.refs.remotes.clone();
                     let names = tab.refs.remote_names.clone();
                     if section(ui, "REMOTES", names.len()) {
-                        if names.is_empty() {
-                            empty_row(ui, "No remotes");
-                        }
                         let repo_key = tab.path.display().to_string();
                         for remote in &names {
                             let rbs: Vec<&RemoteBranch> =
@@ -304,16 +301,38 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                             row.caret = Some(open);
                             row.icon_color = p.blue;
                             row.count = (!open).then_some(rbs.len());
-                            if side_row(ui, row).clicked() {
+                            let url = tab
+                                .refs
+                                .remote_urls
+                                .get(remote)
+                                .cloned()
+                                .unwrap_or_default();
+                            let r = side_row(ui, row).on_hover_text(if url.is_empty() {
+                                remote.clone()
+                            } else {
+                                format!("{remote}\n{url}")
+                            });
+                            if r.clicked() {
                                 open = !open;
                                 ui.ctx().data_mut(|d| d.insert_persisted(id, open));
                             }
+                            remote_menu(&r, remote, &url, actions);
                             if open {
                                 let bnames: Vec<&str> =
                                     rbs.iter().map(|r| r.branch.as_str()).collect();
                                 let tree = branchtree::build(&bnames);
                                 remote_folder(ui, tab, &tree, 1, remote, &rbs, &locals, actions);
                             }
+                        }
+                        let mut row = SideRow::new(ui, "✚", "Add remote…");
+                        row.tree = true;
+                        row.icon_color = p.accent_hover;
+                        row.label_color = p.subtext;
+                        if side_row(ui, row)
+                            .on_hover_text("Connect this repository to a server (GitHub, GitLab …)")
+                            .clicked()
+                        {
+                            actions.push(Action::AddRemote);
                         }
                     }
 
@@ -399,6 +418,46 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                     ui.add_space(12.0);
                 });
         });
+}
+
+/// Right-click menu of a remote in the sidebar.
+fn remote_menu(r: &egui::Response, remote: &str, url: &str, actions: &mut Vec<Action>) {
+    r.context_menu(|ui| {
+        if ui.button("Fetch").clicked() {
+            actions.push(Action::Run(Op::Fetch));
+            ui.close();
+        }
+        if ui.button("Edit name / URL…").clicked() {
+            actions.push(Action::EditRemote(remote.to_string()));
+            ui.close();
+        }
+        if ui.add_enabled(!url.is_empty(), egui::Button::new("Copy URL")).clicked() {
+            ui.ctx().copy_text(url.to_string());
+            ui.close();
+        }
+        if let Some(web) = crate::github::repo_slug(url).map(|s| format!("https://github.com/{s}")) {
+            if ui.button("Open on GitHub").clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(web));
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Add another remote…").clicked() {
+            actions.push(Action::AddRemote);
+            ui.close();
+        }
+        if ui.button("Remove…").clicked() {
+            actions.push(Action::Dialog(Dialog::Confirm {
+                title: "Remove remote".into(),
+                text: format!(
+                    "Remove the remote '{remote}'?\nIts remote-tracking branches ({remote}/…) are removed from this computer. Nothing changes on the server."
+                ),
+                op: Op::RemoteRemove(remote.to_string()),
+                danger: true,
+            }));
+            ui.close();
+        }
+    });
 }
 
 fn empty_row(ui: &mut egui::Ui, text: &str) {
@@ -767,7 +826,8 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         .ctx()
         .data_mut(|d| d.get_persisted(col_widths_id()))
         .unwrap_or_default();
-    let auto_graph = LANE_W * tab.graph_lanes as f32 + 10.0;
+    // wide enough for the lanes, and for the "Graph" header
+    let auto_graph = (LANE_W * tab.graph_lanes as f32 + 10.0).max(48.0);
     let mut graph_w = if show_graph {
         widths.graph.unwrap_or(auto_graph)
     } else {
@@ -1794,9 +1854,20 @@ fn commit_box(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
                 "  Commit  "
             };
             if theme::primary_button(ui, label, can_commit).clicked() || (shortcut && can_commit) {
+                // First push of a branch (e.g. a remote was just added): set its upstream.
+                let has_upstream = tab.head_branch().is_some_and(|b| b.upstream.is_some());
+                let upstream = match (&tab.refs.head_name, tab.refs.remote_names.first()) {
+                    (Some(branch), Some(remote))
+                        if tab.push_after_commit && !has_upstream && !tab.refs.head_detached =>
+                    {
+                        Some((remote.clone(), branch.clone()))
+                    }
+                    _ => None,
+                };
                 actions.push(Action::Run(Op::Commit {
                     message: tab.commit_msg.trim_end().to_string() + "\n",
                     amend: tab.amend,
+                    upstream,
                     push: tab.push_after_commit,
                 }));
             }
