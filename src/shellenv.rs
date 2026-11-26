@@ -124,12 +124,11 @@ pub fn check_git() -> Result<String, String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::merge_paths;
 
     #[test]
-    #[cfg(not(windows))]
     fn merge_keeps_order_and_drops_duplicates() {
         assert_eq!(
             merge_paths("/opt/homebrew/bin:/usr/bin", "/usr/bin:/bin::/usr/bin"),

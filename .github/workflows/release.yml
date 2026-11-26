@@ -25,7 +25,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - id: v
         name: Version from Cargo.toml (must match the tag)
         run: |
@@ -38,11 +38,11 @@ jobs:
 
   macos:
     needs: version
-    runs-on: macos-14
+    runs-on: macos-latest
     env:
       HAS_SIGNING_CERT: ${{ secrets.MACOS_CERTIFICATE != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
@@ -79,7 +79,7 @@ jobs:
     needs: version
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked
@@ -101,7 +101,7 @@ jobs:
     # Oldest supported Ubuntu → the binary runs on older glibc versions too.
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build dependencies
@@ -133,7 +133,7 @@ jobs:
     needs: [version, macos, windows, linux]
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
