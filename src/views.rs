@@ -420,9 +420,45 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         });
 }
 
+/// Where the app leaves the connected GitHub logins for [`remote_menu`] each frame.
+pub fn github_logins_id() -> egui::Id {
+    egui::Id::unique("github_logins")
+}
+
 /// Right-click menu of a remote in the sidebar.
 fn remote_menu(r: &egui::Response, remote: &str, url: &str, actions: &mut Vec<Action>) {
     r.context_menu(|ui| {
+        // Which GitHub account this remote uses: the user name in an HTTPS github.com URL.
+        let logins: Vec<String> = ui
+            .ctx()
+            .data(|d| d.get_temp(github_logins_id()))
+            .unwrap_or_default();
+        let is_github_https =
+            url.starts_with("https://") && crate::github::repo_slug(url).is_some();
+        if is_github_https && !logins.is_empty() {
+            let current = crate::github::url_user(url).map(String::from);
+            ui.menu_button("GitHub account", |ui| {
+                let set = |user: Option<&str>| Op::RemoteEdit {
+                    name: remote.to_string(),
+                    new_name: None,
+                    url: Some(crate::github::url_with_user(url, user)),
+                };
+                if ui
+                    .radio(current.is_none(), "Active account (whichever is selected)")
+                    .clicked()
+                {
+                    actions.push(Action::Run(set(None)));
+                    ui.close();
+                }
+                for l in &logins {
+                    if ui.radio(current.as_deref() == Some(l.as_str()), l).clicked() {
+                        actions.push(Action::Run(set(Some(l))));
+                        ui.close();
+                    }
+                }
+            });
+            ui.separator();
+        }
         if ui.button("Fetch").clicked() {
             actions.push(Action::Run(Op::Fetch));
             ui.close();

@@ -44,8 +44,8 @@ FoxGit เช็กเวอร์ชันใหม่ให้เองวั�
 | **Branch / Remote** | สร้าง, checkout, merge, rebase, ลบ, push (ตั้ง upstream / force-with-lease), pull (merge/rebase), fetch, clone, auto-fetch ทุกแท็บใน background |
 | **ตั้ง remote ทีหลัง** | repo ที่สร้างในเครื่อง (`git init`) กด **Add remote…** ใน sidebar แล้วใส่ URL หรือเลือก **Create on GitHub** ให้สร้าง repo บน GitHub แล้วผูก + push ให้ในขั้นตอนเดียว คลิกขวาที่ remote เพื่อแก้ชื่อ/URL หรือลบ |
 | **คลิกขวาที่ commit** | checkout, สร้าง branch/tag, merge, cherry-pick, revert, reset (soft/mixed/hard), คัดลอก SHA |
-| **บัญชี GitHub** | กด **Sign in** แล้ววาง Personal Access Token (มีลิงก์สร้าง token ที่ติ๊กสิทธิ์ให้แล้ว) เก็บใน Keychain ของระบบ push/pull ไป github.com ไม่ต้องใส่รหัสอีก |
-| **Clone จาก GitHub** | หน้า **Projects → Remote** แสดง repo ทั้งหมดที่บัญชีมีสิทธิ์ (ของตัวเอง, org, ที่เป็น collaborator) ค้นหาแล้วกด Clone ได้เลย |
+| **บัญชี GitHub (หลาย account)** | กด **Sign in** แล้ววาง Personal Access Token (มีลิงก์สร้าง token ที่ติ๊กสิทธิ์ให้แล้ว) เก็บใน Keychain ของระบบ เพิ่มได้หลาย account และสลับได้จากเมนู account ที่ toolbar push/pull ไป github.com ไม่ต้องใส่รหัสอีก repo ที่ clone จาก account ไหนจะใช้ token ของ account นั้นเสมอ (เปลี่ยนได้ที่คลิกขวา remote → GitHub account) |
+| **Clone จาก GitHub** | หน้า **Projects → Remote** แสดง repo ทั้งหมดที่แต่ละ account มีสิทธิ์ (ของตัวเอง, org, ที่เป็น collaborator) แยกกลุ่มตาม account ค้นหาแล้วกด Clone ได้เลย |
 | **อื่น ๆ** | Stash, Tag, ธีมมืด/สว่าง, หน้าต่าง Log ดู output ของ git, ถาม passphrase/รหัสผ่านผ่านหน้าต่าง, ภาษาไทยแสดงผลได้ |
 
 <p align="center"><img src="docs/screenshots/projects.png" width="49%" alt="Projects"> <img src="docs/screenshots/light.png" width="49%" alt="Light theme"></p>

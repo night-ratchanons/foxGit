@@ -15,9 +15,11 @@ First public release.
 - Stage, unstage and discard whole files, single hunks or individual lines.
 - Remotes: add one to a repository created locally (or create a new GitHub repository for it
   in one step), edit its name / URL, remove it; Commit & Push sets the upstream on the first push.
-- GitHub account: connect with a personal access token; it is kept in the system keychain and
-  used automatically for HTTPS remotes on github.com.
-- Projects → Remote: every repository your GitHub account can access, with one-click Clone.
+- GitHub accounts: connect one or more with a personal access token (kept in the system
+  keychain) and switch between them from the toolbar. HTTPS remotes on github.com use the
+  account named in the URL (FoxGit writes it when cloning / creating), otherwise the active one.
+- Projects → Remote: every repository each GitHub account can access, grouped by account,
+  with one-click Clone.
 - New dark theme (default) and a matching light theme.
 
 ### Also

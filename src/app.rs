@@ -396,9 +396,12 @@ struct Saved {
     dark: Option<bool>,
     #[serde(default)]
     auto_fetch_min: Option<u32>,
-    /// GitHub login whose token is in the keychain (the token itself is never written here).
+    /// Active GitHub login (older versions had only this one account).
     #[serde(default)]
     github_login: Option<String>,
+    /// Every connected GitHub login; their tokens live in the keychain, never in this file.
+    #[serde(default)]
+    github_accounts: Vec<String>,
     /// Folder the last clone went into.
     #[serde(default)]
     clone_parent: Option<String>,
@@ -540,7 +543,15 @@ impl FoxGitApp {
                 .unwrap_or_else(Instant::now),
             fetch_rx: None,
             fetch_manual: false,
-            github: GitHub::new(&cc.egui_ctx, saved.github_login.clone()),
+            github: GitHub::new(
+                &cc.egui_ctx,
+                if saved.github_accounts.is_empty() {
+                    saved.github_login.iter().cloned().collect()
+                } else {
+                    saved.github_accounts.clone()
+                },
+                saved.github_login.clone(),
+            ),
             clone_parent: saved.clone_parent.clone().unwrap_or_else(dirs_home),
             git_check: GitCheck::Found,
             show_about: false,
@@ -1250,7 +1261,6 @@ impl FoxGitApp {
                         self.launcher.mode = LauncherMode::Remote;
                     }
                     Some(MenuAction::SignIn) => self.github.open_signin(),
-                    Some(MenuAction::SignOut) => self.github.sign_out(),
                     None => {}
                 }
                 toolbar_divider(ui);
@@ -2480,6 +2490,9 @@ impl eframe::App for FoxGitApp {
             .frame(theme::panel(p.crust, 12, 4))
             .show(ui, |ui| self.status_bar(ui));
 
+        // connected GitHub logins, for the "GitHub account" menu on remotes in the sidebar
+        let logins = self.github.logins();
+        ctx.data_mut(|d| d.insert_temp(views::github_logins_id(), logins));
         if self.show_launcher || self.tabs.is_empty() {
             egui::CentralPanel::default().show(ui, |ui| self.launcher_ui(ui));
         } else {
@@ -2515,7 +2528,8 @@ impl eframe::App for FoxGitApp {
             projects: self.projects.clone(),
             dark: Some(self.dark),
             auto_fetch_min: Some(self.auto_fetch_min),
-            github_login: self.github.saved_login(),
+            github_login: self.github.saved_active(),
+            github_accounts: self.github.saved_logins(),
             clone_parent: Some(self.clone_parent.clone()),
             last_update_check: self.last_update_check,
         };

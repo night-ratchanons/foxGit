@@ -253,40 +253,71 @@ pub fn delete_token(login: &str) {
 // Credentials for git
 // ---------------------------------------------------------------------------
 
-static GIT_CREDENTIAL: Mutex<Option<(String, String)>> = Mutex::new(None);
-const ENV_USER: &str = "FOXGIT_GH_USER";
-const ENV_TOKEN: &str = "FOXGIT_GH_TOKEN";
+static GIT_CREDENTIALS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// Use this account (login, token) for every HTTPS remote on github.com, or stop doing so.
-pub fn set_git_credential(cred: Option<(String, String)>) {
-    if let Ok(mut c) = GIT_CREDENTIAL.lock() {
-        *c = cred;
+/// Accounts (login, token) git may use for HTTPS remotes on github.com — the active account
+/// first. An empty list stops FoxGit from answering for github.com.
+pub fn set_git_credentials(accounts: Vec<(String, String)>) {
+    if let Ok(mut c) = GIT_CREDENTIALS.lock() {
+        *c = accounts;
     }
 }
 
 /// `git -c …` arguments and environment variables for a git child process.
-pub type GitCredential = (Vec<String>, Vec<(&'static str, String)>);
+pub type GitCredential = (Vec<String>, Vec<(String, String)>);
+
+/// Picks the account by the user name in the remote URL (`https://alice@github.com/…`, which
+/// FoxGit writes when it clones or creates a repository for an account); a URL without a user
+/// name gets the active account (index 0). An unknown user name gets no answer, so git asks.
+const HELPER: &str = r#"!f() { test "$1" = get || exit 0; u=; while IFS= read -r l; do [ -z "$l" ] && break; case "$l" in username=*) u=${l#username=};; esac; done; i=0; while :; do eval "n=\${FOXGIT_GH_USER_$i-}"; [ -z "$n" ] && break; if [ -z "$u" ] || [ "$n" = "$u" ]; then eval "t=\$FOXGIT_GH_TOKEN_$i"; echo "username=$n"; echo "password=$t"; exit 0; fi; i=$((i+1)); done; }; f"#;
 
 /// Extra `git -c …` arguments and environment for a git child process.
 ///
 /// The empty `helper=` resets the helper list for github.com only (so a stale entry in
-/// osxkeychain / Credential Manager can't win), then a tiny inline helper answers with the
+/// osxkeychain / Credential Manager can't win), then a tiny inline helper answers with a
 /// token from the environment. Other hosts keep the user's own helpers.
 pub fn git_credential() -> Option<GitCredential> {
-    let c = GIT_CREDENTIAL.lock().ok()?;
-    let (user, token) = c.as_ref()?;
-    let helper = format!(
-        "!f() {{ test \"$1\" = get || exit 0; echo \"username=${ENV_USER}\"; echo \"password=${ENV_TOKEN}\"; }}; f"
-    );
+    let c = GIT_CREDENTIALS.lock().ok()?;
+    if c.is_empty() {
+        return None;
+    }
+    let mut env = Vec::new();
+    for (i, (user, token)) in c.iter().enumerate() {
+        env.push((format!("FOXGIT_GH_USER_{i}"), user.clone()));
+        env.push((format!("FOXGIT_GH_TOKEN_{i}"), token.clone()));
+    }
     Some((
         vec![
             "-c".into(),
             "credential.https://github.com.helper=".into(),
             "-c".into(),
-            format!("credential.https://github.com.helper={helper}"),
+            format!("credential.https://github.com.helper={HELPER}"),
         ],
-        vec![(ENV_USER, user.clone()), (ENV_TOKEN, token.clone())],
+        env,
     ))
+}
+
+/// The user name in an HTTPS URL (`https://alice@github.com/…` → `alice`).
+pub fn url_user(url: &str) -> Option<&str> {
+    let rest = url.strip_prefix("https://")?;
+    let (auth, _) = rest.split_once('@')?;
+    let host_start = rest.find('/').unwrap_or(rest.len());
+    (auth.len() < host_start && !auth.is_empty()).then(|| auth.split(':').next().unwrap_or(auth))
+}
+
+/// The same HTTPS URL with `user` (or no user) in it; other URLs (SSH) are returned unchanged.
+pub fn url_with_user(url: &str, user: Option<&str>) -> String {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return url.to_string();
+    };
+    let rest = match url_user(url) {
+        Some(_) => rest.split_once('@').map(|(_, r)| r).unwrap_or(rest),
+        None => rest,
+    };
+    match user {
+        Some(u) => format!("https://{u}@{rest}"),
+        None => format!("https://{rest}"),
+    }
 }
 
 /// `owner/name` (lower-case) for a github.com remote URL in any of its usual forms.
@@ -336,12 +367,38 @@ mod tests {
     }
 
     #[test]
-    fn git_uses_token_for_github_only() {
-        set_git_credential(Some(("octo".into(), "tok123".into())));
+    fn url_users() {
+        assert_eq!(url_user("https://alice@github.com/o/r.git"), Some("alice"));
+        assert_eq!(url_user("https://github.com/o/r.git"), None);
+        assert_eq!(url_user("git@github.com:o/r.git"), None);
+        assert_eq!(
+            url_with_user("https://github.com/o/r.git", Some("bob")),
+            "https://bob@github.com/o/r.git"
+        );
+        assert_eq!(
+            url_with_user("https://alice@github.com/o/r.git", Some("bob")),
+            "https://bob@github.com/o/r.git"
+        );
+        assert_eq!(
+            url_with_user("https://alice@github.com/o/r.git", None),
+            "https://github.com/o/r.git"
+        );
+        assert_eq!(
+            url_with_user("git@github.com:o/r.git", Some("bob")),
+            "git@github.com:o/r.git"
+        );
+    }
+
+    #[test]
+    fn git_picks_the_account_by_url_user() {
+        set_git_credentials(vec![
+            ("octo".into(), "tok-active".into()),
+            ("night-cat".into(), "tok-second".into()),
+        ]);
         let (args, env) = git_credential().unwrap();
-        set_git_credential(None);
+        set_git_credentials(Vec::new());
         let dir = tempfile::tempdir().unwrap();
-        let fill = |host: &str| {
+        let fill = |desc: &str| {
             let out = std::process::Command::new("git")
                 .current_dir(dir.path())
                 .args(&args)
@@ -350,7 +407,7 @@ mod tests {
                     "credential.helper=!f() { echo username=other; echo password=otherpw; }; f",
                 ])
                 .args(["credential", "fill"])
-                .envs(env.iter().map(|(k, v)| (*k, v.as_str())))
+                .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
                 .env("GIT_TERMINAL_PROMPT", "0")
                 // keep the user's own helpers (osxkeychain …) out of the test
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -363,24 +420,27 @@ mod tests {
                     c.stdin
                         .take()
                         .unwrap()
-                        .write_all(format!("protocol=https\nhost={host}\n\n").as_bytes())?;
+                        .write_all(format!("{desc}\n\n").as_bytes())?;
                     c.wait_with_output()
                 })
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).to_string()
         };
-        // The generic helper is configured after ours here, so it is in the list for github.com
-        // too — git asks helpers in order and stops at the first complete answer (ours).
-        let gh = fill("github.com");
+        // no user in the URL → the active account
+        let a = fill("protocol=https\nhost=github.com");
         assert!(
-            gh.contains("username=octo") && gh.contains("password=tok123"),
-            "{gh}"
+            a.contains("username=octo") && a.contains("password=tok-active"),
+            "{a}"
         );
-        let other = fill("git.example.invalid");
-        assert!(
-            other.contains("password=otherpw") && !other.contains("tok123"),
-            "{other}"
-        );
+        // user in the URL → that account's token
+        let b = fill("protocol=https\nhost=github.com\nusername=night-cat");
+        assert!(b.contains("password=tok-second"), "{b}");
+        // a user we don't know → we stay quiet and the next helper answers
+        let c = fill("protocol=https\nhost=github.com\nusername=stranger");
+        assert!(c.contains("password=otherpw") && !c.contains("tok-"), "{c}");
+        // other hosts are never answered by us
+        let d = fill("protocol=https\nhost=git.example.invalid");
+        assert!(d.contains("password=otherpw") && !d.contains("tok-"), "{d}");
         assert!(git_credential().is_none());
     }
 }
