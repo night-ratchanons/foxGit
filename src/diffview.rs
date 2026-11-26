@@ -112,12 +112,32 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
     let partial = partial_mode(tab);
 
     // ---------------------------------------------------------------- header
+    let pl = crate::theme::pal(ui);
     ui.horizontal(|ui| {
-        ui.label(RichText::new(&path).strong().monospace());
+        let (dir, name) = match path.rsplit_once('/') {
+            Some((d, n)) => (format!("{d}/"), n.to_string()),
+            None => (String::new(), path.clone()),
+        };
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.label(RichText::new(dir).monospace().color(pl.faint));
+        ui.label(
+            RichText::new(name)
+                .monospace()
+                .strong()
+                .color(pl.text_strong),
+        );
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.add_space(10.0);
         if let Some(Ok(d)) = &tab.diff {
-            ui.label(RichText::new(format!("+{}", d.added)).color(Color32::from_rgb(72, 187, 120)));
             ui.label(
-                RichText::new(format!("−{}", d.removed)).color(Color32::from_rgb(235, 90, 90)),
+                RichText::new(format!("+{}", d.added))
+                    .monospace()
+                    .color(pl.green),
+            );
+            ui.label(
+                RichText::new(format!("−{}", d.removed))
+                    .monospace()
+                    .color(pl.red),
             );
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -172,7 +192,7 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
             |ui| {
                 ui.set_min_height(bar_h);
             if let (Some(mode), Some(Ok(diff))) = (partial, &tab.diff) {
-                let accent = ui.visuals().selection.bg_fill;
+                let accent = crate::theme::pal(ui).accent;
                 if tab.line_sel.is_empty() {
                     ui.add_space(7.0);
                     ui.label(
@@ -183,8 +203,9 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
                 } else {
                     let mut clear = false;
                     egui::Frame::new()
-                        .fill(accent.gamma_multiply(0.25))
-                        .corner_radius(6.0)
+                        .fill(crate::theme::alpha(accent, 0.18))
+                        .stroke(Stroke::new(1.0, crate::theme::alpha(accent, 0.45)))
+                        .corner_radius(8.0)
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -254,7 +275,7 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
     let diff = match &tab.diff {
         Some(Ok(d)) => d.clone(),
         Some(Err(e)) => {
-            ui.colored_label(Color32::from_rgb(230, 90, 80), e);
+            ui.colored_label(pl.red, e);
             return;
         }
         None => return,
@@ -289,25 +310,20 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
         .unwrap_or(0);
     let content_w = gutter + char_w * (max_chars as f32 + 4.0);
 
-    let dark = ui.visuals().dark_mode;
-    let (add_bg, del_bg, hunk_bg) = if dark {
-        (
-            Color32::from_rgba_unmultiplied(46, 160, 67, 50),
-            Color32::from_rgba_unmultiplied(248, 81, 73, 50),
-            Color32::from_rgba_unmultiplied(56, 139, 253, 35),
-        )
-    } else {
-        (
-            Color32::from_rgb(220, 255, 228),
-            Color32::from_rgb(255, 225, 225),
-            Color32::from_rgb(221, 236, 255),
-        )
-    };
-    let accent = ui.visuals().selection.bg_fill;
-    let sel_bg = accent.gamma_multiply(if dark { 0.45 } else { 0.30 });
-    let text_color = ui.visuals().text_color();
-    let weak = ui.visuals().weak_text_color();
-    let gutter_bg = ui.visuals().faint_bg_color;
+    use crate::theme::alpha;
+    let dark = pl.dark;
+    let k = if dark { 1.0 } else { 0.75 };
+    let (add_bg, del_bg, hunk_bg) = (
+        alpha(pl.green, 0.13 * k),
+        alpha(pl.red, 0.13 * k),
+        alpha(pl.blue, 0.10 * k),
+    );
+    let (add_gutter, del_gutter) = (alpha(pl.green, 0.22 * k), alpha(pl.red, 0.22 * k));
+    let accent = pl.accent;
+    let sel_bg = alpha(accent, if dark { 0.30 } else { 0.22 });
+    let text_color = pl.text;
+    let weak = pl.faint;
+    let gutter_bg = pl.stripe;
 
     let pointer_down = ui.input(|i| i.pointer.primary_down());
     let shift = ui.input(|i| i.modifiers.shift);
@@ -389,7 +405,16 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
                     painter.rect_filled(rect, 0.0, accent.gamma_multiply(0.12));
                 }
                 let g = Rect::from_min_size(rect.min, vec2(gutter - 6.0, LINE_H));
-                painter.rect_filled(g, 0.0, gutter_bg);
+                painter.rect_filled(
+                    g,
+                    0.0,
+                    match line.kind {
+                        LineKind::Added => add_gutter,
+                        LineKind::Removed => del_gutter,
+                        LineKind::Hunk => Color32::TRANSPARENT,
+                        _ => gutter_bg,
+                    },
+                );
                 if is_sel {
                     painter.rect_filled(
                         Rect::from_min_size(rect.min, vec2(3.0, LINE_H)),
@@ -422,7 +447,7 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
                     LineKind::Added => ("+", text_color),
                     LineKind::Removed => ("-", text_color),
                     LineKind::Context => (" ", text_color),
-                    LineKind::Hunk => ("", Color32::from_rgb(110, 160, 240)),
+                    LineKind::Hunk => ("", pl.blue),
                     LineKind::Meta => ("", weak),
                 };
                 let text = format!("{prefix}{}", line.text.replace('\t', "    "));
@@ -469,21 +494,21 @@ pub fn diff_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>
                                 &ui.visuals().widgets.inactive
                             };
                             let fill = match op {
-                                PartialOp::Discard if b.hovered() => Color32::from_rgb(150, 50, 50),
+                                PartialOp::Discard if b.hovered() => pl.red,
                                 PartialOp::Stage | PartialOp::Unstage => {
                                     if b.hovered() {
-                                        accent
+                                        pl.accent_hover
                                     } else {
-                                        accent.gamma_multiply(0.7)
+                                        accent
                                     }
                                 }
-                                _ => v.bg_fill,
+                                _ => v.weak_bg_fill,
                             };
-                            ui.painter().rect_filled(r, 4.0, fill);
+                            ui.painter().rect_filled(r, 5.0, fill);
                             let tc = if matches!(op, PartialOp::Discard) && !b.hovered() {
                                 v.fg_stroke.color
                             } else {
-                                Color32::WHITE
+                                pl.on_accent
                             };
                             ui.painter().galley(
                                 pos2(

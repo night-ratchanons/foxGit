@@ -743,6 +743,11 @@ pub fn run_git_ext(
     background: bool,
 ) -> CmdOutput {
     let mut cmd = Command::new("git");
+    // Signed in to GitHub? HTTPS remotes on github.com use that account's token.
+    // (`-c` options must come before the subcommand.)
+    if let Some((pre, env)) = crate::github::git_credential() {
+        cmd.args(pre).envs(env);
+    }
     cmd.current_dir(dir)
         .args(args)
         // Never block waiting for a password prompt in a terminal we don't have.

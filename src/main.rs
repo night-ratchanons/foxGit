@@ -1,11 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // no console window on Windows release builds
 
+mod account;
 mod app;
 mod askpass;
+mod branchtree;
 mod diffview;
 mod git;
+mod github;
 mod graph;
 mod tabs;
+mod theme;
 mod views;
 
 use eframe::egui;

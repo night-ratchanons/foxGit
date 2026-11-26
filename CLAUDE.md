@@ -25,6 +25,10 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 | `src/graph.rs` | Commit-graph lane layout algorithm (pure, unit-tested). |
 | `src/git.rs` | Backend. **Reads** via libgit2 (`Repo`: commits, refs, status, diff). **Writes** via the `git` CLI (`Op` enum → `Op::run`). `FileDiff::build_patch` builds partial patches for `git apply`. |
 | `src/askpass.rs` | Credential prompts: localhost TCP server + token; our own exe is set as GIT_ASKPASS/SSH_ASKPASS. |
+| `src/theme.rs` | Dark (default) / light `Palette`, egui `Style`, and shared painted widgets (`ghost_button`, `segmented`, pills, carets, avatars). Hand-painted UI takes colors from `theme::pal(ui)`. |
+| `src/branchtree.rs` | Groups branch names into folders by `/` prefix for the sidebar (pure, unit-tested). |
+| `src/github.rs` | GitHub backend: device flow + PAT sign-in, `/user/repos` listing, keychain storage (`keyring`), and `git_credential()` — URL-scoped `-c credential.https://github.com.helper` args injected by `run_git_ext`. |
+| `src/account.rs` | GitHub UI: sign-in modal, toolbar account menu, the Projects page "Remote" list with Clone/Open. |
 
 ### Key conventions
 
@@ -35,7 +39,8 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 - **Never block the UI thread** on network or long work. History loads on a thread (`RepoTab::start_history_load`); network ops go through the job queue or the auto-fetch thread.
 - Lists and diffs are virtualized with `ScrollArea::show_rows`; keep row heights uniform.
 - egui 0.37 API notes: `App::ui(&mut self, ui, frame)` + `App::logic`; panels are `egui::Panel::left/right/top/bottom(id).show(ui, …)` and `CentralPanel::default().show(ui, …)`; use `Id::unique` (not `Id::new`) and `ui.scope_id()` (not `ui.id()`); git2 0.21 string getters return `Result`, not `Option`.
-- Fonts: eframe `system_fonts` feature handles Thai/CJK fallback; `egui/monochrome_emoji_fonts` provides icons. Not every Unicode symbol renders, so check new icons on screen.
+- Fonts: eframe `system_fonts` feature handles Thai/CJK fallback; `egui/monochrome_emoji_fonts` provides icons. Not every Unicode symbol renders (e.g. `⑂` shows as a box on macOS — use `theme::BRANCH` = `⎇`), so check new icons on screen.
+- Theme: `theme::apply` sets the theme preference explicitly; never use `ctx.set_visuals` (egui follows the OS appearance and would drop it).
 
 ## Testing
 
@@ -57,5 +62,6 @@ Requires Rust >= 1.95 (eframe 0.37 MSRV), `git` on PATH, a C compiler (libgit2 i
 ## Known limits
 
 - Hunk/line staging only for modified files (new/deleted/conflicted files are staged whole).
-- Credentials ticked "Remember" are kept in memory only, for the session.
+- Credentials ticked "Remember" are kept in memory only, for the session. The GitHub account token is the exception: it lives in the OS keychain (only the login is saved in app state).
+- GitHub browser sign-in needs an OAuth App client ID (entered in the sign-in dialog or baked in with `RUSTTREE_GITHUB_CLIENT_ID=… cargo build`); a personal access token works without one.
 - Bare repositories are not supported.

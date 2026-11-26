@@ -1,5 +1,6 @@
 //! Browser-style project tabs and the "Projects" launcher page.
 
+use crate::theme::{self, pal};
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke};
 use std::collections::HashMap;
@@ -381,7 +382,7 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
     );
     let branch_g = t.branch.as_ref().map(|b| {
         ui.painter().layout_no_wrap(
-            format!("⑂ {}", truncate(b, 18)),
+            format!("{} {}", theme::BRANCH, truncate(b, 18)),
             FontId::proportional(11.0),
             weak,
         )
@@ -394,7 +395,7 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
                 t.changes.to_string()
             },
             FontId::proportional(10.5),
-            Color32::WHITE,
+            Color32::from_gray(20),
         )
     });
     let sync_text = match (t.ahead, t.behind) {
@@ -403,12 +404,10 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
         (0, b) => Some(format!("↓{b}")),
         (a, b) => Some(format!("↑{a}↓{b}")),
     };
+    let pl = pal(ui);
     let sync_g = sync_text.map(|s| {
-        ui.painter().layout_no_wrap(
-            s,
-            FontId::proportional(11.0),
-            Color32::from_rgb(110, 170, 240),
-        )
+        ui.painter()
+            .layout_no_wrap(s, FontId::monospace(10.5), pl.accent_hover)
     });
 
     let pad = 12.0;
@@ -437,9 +436,9 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
         se: 0,
     };
     if active {
-        painter.rect_filled(rect, radius, visuals.panel_fill);
+        painter.rect_filled(rect, radius, pl.mantle);
         painter.rect_filled(
-            Rect::from_min_size(rect.min + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 2.5)),
+            Rect::from_min_size(rect.min + vec2(10.0, 0.0), vec2(rect.width() - 20.0, 2.0)),
             1.0,
             color,
         );
@@ -447,7 +446,7 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
         painter.rect_filled(
             rect.shrink2(vec2(0.0, 2.0)).translate(vec2(0.0, 2.0)),
             radius,
-            visuals.widgets.hovered.weak_bg_fill,
+            pl.surface0,
         );
     }
     if dragging {
@@ -470,7 +469,7 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
             .color(color)
             .paint_at(ui, dot);
     } else if t.conflict {
-        painter.circle_filled(dot.center(), 4.5, Color32::from_rgb(240, 60, 200));
+        painter.circle_filled(dot.center(), 4.5, pl.pink);
     } else {
         painter.circle_filled(dot.center(), 4.5, color);
     }
@@ -489,18 +488,18 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
     if let Some(g) = sync_g {
         x += 6.0;
         let gw = g.size().x;
-        painter.galley(pos2(x, gy(&g)), g, weak);
+        painter.galley(pos2(x, gy(&g)), g, pl.accent_hover);
         x += gw;
     }
     if let Some(g) = badge_g {
         x += 6.0;
         let bw = (g.size().x + 10.0).max(18.0);
         let pill = Rect::from_min_size(pos2(x, cy - 8.0), vec2(bw, 16.0));
-        painter.rect_filled(pill, 8.0, Color32::from_rgb(221, 128, 38));
+        painter.rect_filled(pill, 8.0, pl.orange);
         painter.galley(
             pos2(pill.center().x - g.size().x / 2.0, gy(&g)),
             g,
-            Color32::WHITE,
+            Color32::from_gray(20),
         );
     }
 
@@ -540,10 +539,10 @@ fn tab(ui: &mut egui::Ui, t: &TabInfo, active: bool, dragging: bool, index: usiz
     if !active && !hovered {
         painter.line_segment(
             [
-                pos2(rect.right() + 1.0, rect.top() + 10.0),
-                pos2(rect.right() + 1.0, rect.bottom() - 8.0),
+                pos2(rect.right() + 1.0, rect.top() + 11.0),
+                pos2(rect.right() + 1.0, rect.bottom() - 9.0),
             ],
-            Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+            Stroke::new(1.0, pl.border_strong),
         );
     }
 
@@ -568,12 +567,12 @@ fn launcher_tab(ui: &mut egui::Ui, only: bool) -> TabResp {
             sw: 0,
             se: 0,
         },
-        visuals.panel_fill,
+        pal(ui).mantle,
     );
     painter.rect_filled(
-        Rect::from_min_size(rect.min + vec2(6.0, 0.0), vec2(rect.width() - 12.0, 2.5)),
+        Rect::from_min_size(rect.min + vec2(10.0, 0.0), vec2(rect.width() - 20.0, 2.0)),
         1.0,
-        visuals.selection.bg_fill,
+        pal(ui).accent,
     );
     let cy = rect.center().y + 1.0;
     painter.text(
@@ -634,8 +633,18 @@ pub enum LauncherEvent {
     Scan,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LauncherMode {
+    /// Saved projects on this computer.
+    Local,
+    /// Repositories of the signed-in GitHub account.
+    Remote,
+}
+
 pub struct LauncherState {
+    pub mode: LauncherMode,
     pub query: String,
+    pub remote_query: String,
     pub branches: HashMap<String, Option<String>>,
     pub focus_search: bool,
     pub scanning: bool,
@@ -645,7 +654,9 @@ pub struct LauncherState {
 impl Default for LauncherState {
     fn default() -> Self {
         Self {
+            mode: LauncherMode::Local,
             query: String::new(),
+            remote_query: String::new(),
             branches: HashMap::new(),
             focus_search: true,
             scanning: false,
@@ -665,12 +676,15 @@ pub fn sorted_projects(projects: &[Project]) -> Vec<Project> {
     v
 }
 
+/// The Projects page. `remote` draws the body of the "Remote" mode (GitHub repositories)
+/// and gets the filter text.
 pub fn launcher(
     ui: &mut egui::Ui,
     st: &mut LauncherState,
     projects: &[Project],
     open_paths: &[String],
     open_colors: &[Color32],
+    remote: &mut dyn FnMut(&mut egui::Ui, &str),
 ) -> Vec<LauncherEvent> {
     let mut ev = Vec::new();
     let q = st.query.trim().to_lowercase();
@@ -686,29 +700,59 @@ pub fn launcher(
         st.selected = list.len().saturating_sub(1);
     }
 
-    let width = ui.available_width().min(820.0);
+    let width = ui.available_width().min(860.0);
     ui.vertical_centered(|ui| {
         ui.set_max_width(width);
         ui.add_space(28.0);
+        let p = pal(ui);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Projects").size(26.0).strong());
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(format!("{} saved · {} open", projects.len(), open_paths.len())).weak(),
-            );
+            ui.label(RichText::new("Projects").size(26.0).strong().color(p.text_strong));
+            ui.add_space(12.0);
+            let mut idx = usize::from(st.mode == LauncherMode::Remote);
+            if theme::segmented(ui, &["Local", "Remote"], &mut idx) {
+                st.mode = if idx == 1 {
+                    LauncherMode::Remote
+                } else {
+                    LauncherMode::Local
+                };
+                st.focus_search = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if st.mode == LauncherMode::Local {
+                    ui.label(
+                        RichText::new(format!("{} saved · {} open", projects.len(), open_paths.len()))
+                            .color(p.faint),
+                    );
+                }
+            });
         });
-        ui.add_space(12.0);
+        ui.add_space(14.0);
 
         // Search / path box
-        let search = egui::TextEdit::singleline(&mut st.query)
-            .hint_text("🔍  Search projects, or paste a folder path and press Enter")
-            .desired_width(f32::INFINITY)
-            .margin(vec2(10.0, 8.0))
-            .font(FontId::proportional(15.0));
+        let remote_mode = st.mode == LauncherMode::Remote;
+        let search = egui::TextEdit::singleline(if remote_mode {
+            &mut st.remote_query
+        } else {
+            &mut st.query
+        })
+        .hint_text(if remote_mode {
+            "🔍  Filter repositories"
+        } else {
+            "🔍  Search projects, or paste a folder path and press Enter"
+        })
+        .desired_width(f32::INFINITY)
+        .margin(vec2(12.0, 9.0))
+        .font(FontId::proportional(15.0));
         let r = ui.add(search);
         if st.focus_search {
             r.request_focus();
             st.focus_search = false;
+        }
+        if remote_mode {
+            ui.add_space(12.0);
+            let q = st.remote_query.clone();
+            remote(ui, &q);
+            return;
         }
         if r.changed() {
             st.selected = 0;
@@ -850,21 +894,20 @@ fn project_card(
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
     let painter = ui.painter();
     let hovered = resp.hovered();
+    let pl = pal(ui);
     let fill = if hovered || selected {
-        visuals.widgets.hovered.weak_bg_fill
+        pl.surface1
     } else {
-        visuals.faint_bg_color
+        pl.surface0
     };
     let card = rect.shrink2(vec2(0.0, 3.0));
-    painter.rect_filled(card, 8.0, fill);
-    if selected {
-        painter.rect_stroke(
-            card,
-            8.0,
-            Stroke::new(1.0, visuals.selection.bg_fill),
-            egui::StrokeKind::Inside,
-        );
-    }
+    painter.rect_filled(card, 10.0, fill);
+    painter.rect_stroke(
+        card,
+        10.0,
+        Stroke::new(1.0, if selected { pl.accent } else { pl.border }),
+        egui::StrokeKind::Inside,
+    );
 
     // Avatar: colored rounded square with the first letter
     let av = Rect::from_min_size(
@@ -899,7 +942,7 @@ fn project_card(
     let mut bx = x + nw + 10.0;
     if let Some(b) = branch {
         let g = painter.layout_no_wrap(
-            format!("⑂ {b}"),
+            format!("{} {b}", theme::BRANCH),
             FontId::proportional(11.5),
             visuals.weak_text_color(),
         );
@@ -908,22 +951,22 @@ fn project_card(
         bx += gw + 10.0;
     }
     if is_open {
-        let g = painter.layout_no_wrap("OPEN".into(), FontId::proportional(9.5), Color32::WHITE);
-        let pill = Rect::from_min_size(pos2(bx, card.top() + 10.0), vec2(g.size().x + 10.0, 15.0));
-        painter.rect_filled(pill, 7.0, Color32::from_rgb(56, 161, 105));
+        let g = painter.layout_no_wrap("OPEN".into(), FontId::proportional(9.5), pl.green);
+        let pill = Rect::from_min_size(pos2(bx, card.top() + 10.0), vec2(g.size().x + 12.0, 15.0));
+        painter.rect_filled(pill, 7.5, theme::alpha(pl.green, 0.16));
         painter.galley(
-            pos2(pill.left() + 5.0, pill.center().y - g.size().y / 2.0),
+            pos2(pill.left() + 6.0, pill.center().y - g.size().y / 2.0),
             g,
-            Color32::WHITE,
+            pl.green,
         );
     }
     if !exists {
         let g = painter.layout_no_wrap(
             "folder not found".into(),
             FontId::proportional(10.5),
-            Color32::from_rgb(230, 90, 80),
+            pl.red,
         );
-        painter.galley(pos2(bx, card.top() + 11.0), g, Color32::WHITE);
+        painter.galley(pos2(bx, card.top() + 11.0), g, pl.red);
     }
     let path_rect = Rect::from_min_max(
         pos2(x, card.top() + 28.0),
@@ -954,7 +997,7 @@ fn project_card(
             if p.pinned { "★" } else { "☆" },
             FontId::proportional(16.0),
             if p.pinned {
-                Color32::from_rgb(236, 201, 75)
+                pl.yellow
             } else {
                 visuals.weak_text_color()
             },

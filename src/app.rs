@@ -1,9 +1,11 @@
 //! Application state, background jobs, toolbar, tabs and dialogs.
 
+use crate::account::{GitHub, MenuAction, RemoteEvent};
 use crate::askpass::{self, AskRequest};
 use crate::git::{self, CommitInfo, DiffTarget, FileChange, FileDiff, Op, Refs, Repo, WorkStatus};
 use crate::graph::{self, GraphRow};
-use crate::tabs::{self, LauncherEvent, LauncherState, Project, TabEvent, TabInfo};
+use crate::tabs::{self, LauncherEvent, LauncherMode, LauncherState, Project, TabEvent, TabInfo};
+use crate::theme;
 use crate::views;
 use eframe::egui;
 use egui::{Color32, RichText};
@@ -352,6 +354,14 @@ struct Saved {
     dark: Option<bool>,
     #[serde(default)]
     auto_fetch_min: Option<u32>,
+    /// GitHub login whose token is in the keychain (the token itself is never written here).
+    #[serde(default)]
+    github_login: Option<String>,
+    #[serde(default)]
+    github_client_id: Option<String>,
+    /// Folder the last clone went into.
+    #[serde(default)]
+    clone_parent: Option<String>,
 }
 
 enum FetchMsg {
@@ -403,6 +413,9 @@ pub struct RustTreeApp {
     last_auto_fetch: Instant,
     fetch_rx: Option<Receiver<FetchMsg>>,
     fetch_manual: bool,
+
+    github: GitHub,
+    clone_parent: String,
 }
 
 impl RustTreeApp {
@@ -467,6 +480,12 @@ impl RustTreeApp {
                 .unwrap_or_else(Instant::now),
             fetch_rx: None,
             fetch_manual: false,
+            github: GitHub::new(
+                &cc.egui_ctx,
+                saved.github_login.clone(),
+                saved.github_client_id.clone(),
+            ),
+            clone_parent: saved.clone_parent.clone().unwrap_or_else(dirs_home),
         };
         app.apply_theme(&cc.egui_ctx);
 
@@ -482,13 +501,7 @@ impl RustTreeApp {
     }
 
     fn apply_theme(&self, ctx: &egui::Context) {
-        let mut visuals = if self.dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        visuals.selection.bg_fill = Color32::from_rgb(38, 110, 200);
-        ctx.set_visuals(visuals);
+        theme::apply(ctx, self.dark);
     }
 
     fn open_repo_quiet(&mut self, path: &Path) -> bool {
@@ -567,6 +580,7 @@ impl RustTreeApp {
             if let Some(path) = done.open_after {
                 if done.ok {
                     self.open_repo(&path);
+                    self.github.invalidate_local();
                 }
             }
             if let Some(id) = done.tab_id {
@@ -664,9 +678,11 @@ impl RustTreeApp {
     fn toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let has_tab = !self.tabs.is_empty() && !self.show_launcher;
         ui.horizontal(|ui| {
-            ui.spacing_mut().button_padding = egui::vec2(10.0, 6.0);
+            ui.spacing_mut().item_spacing.x = 2.0;
 
-            ui.menu_button(RichText::new("☰ Repository").size(14.0), |ui| {
+            let repo_btn = theme::ghost_button(ui, "☰", "Repository", 0, false);
+            egui::Popup::menu(&repo_btn).show(|ui| {
+                ui.set_min_width(250.0);
                 if ui.button("Open…   (Ctrl+O)").clicked() {
                     ui.close();
                     self.pick_folder();
@@ -675,7 +691,7 @@ impl RustTreeApp {
                     ui.close();
                     self.dialog = Some(Dialog::Clone {
                         url: String::new(),
-                        parent: dirs_home(),
+                        parent: self.clone_parent.clone(),
                         name: String::new(),
                     });
                 }
@@ -691,7 +707,7 @@ impl RustTreeApp {
                 if ui
                     .add_enabled(
                         self.fetch_rx.is_none(),
-                        egui::Button::new("⟳ Fetch all open projects now"),
+                        egui::Button::new("Fetch all open projects now"),
                     )
                     .clicked()
                 {
@@ -730,9 +746,9 @@ impl RustTreeApp {
                 ui.separator();
                 if ui
                     .button(if self.dark {
-                        "☀ Light theme"
+                        "☀  Light theme"
                     } else {
-                        "🌙 Dark theme"
+                        "🌙  Dark theme"
                     })
                     .clicked()
                 {
@@ -742,7 +758,7 @@ impl RustTreeApp {
                 }
             });
 
-            ui.separator();
+            toolbar_divider(ui);
 
             ui.add_enabled_ui(has_tab, |ui| {
                 let tab = self.tabs.get(self.active);
@@ -750,29 +766,42 @@ impl RustTreeApp {
                     .and_then(|t| t.head_branch())
                     .map(|b| (b.ahead, b.behind))
                     .unwrap_or((0, 0));
-                let staged = tab.map(|t| t.status.staged.len()).unwrap_or(0);
                 let changes = tab
                     .map(|t| t.status.staged.len() + t.status.unstaged.len())
                     .unwrap_or(0);
 
                 let mut go_status = false;
-                if tool_button(ui, "✚", "Commit", changes).clicked() {
+                if theme::ghost_button(ui, "✚", "Commit", changes, false)
+                    .on_hover_text("Stage and commit changes")
+                    .clicked()
+                {
                     go_status = true;
                 }
-                let _ = staged;
-                if tool_button(ui, "⬇", "Pull", behind).clicked() {
+                if theme::ghost_button(ui, "⬇", "Pull", behind, false)
+                    .on_hover_text("Pull from the tracked branch")
+                    .clicked()
+                {
                     actions.push(Action::Dialog(Dialog::Pull { rebase: false }));
                 }
-                if tool_button(ui, "⬆", "Push", ahead).clicked() {
+                if theme::ghost_button(ui, "⬆", "Push", ahead, false)
+                    .on_hover_text("Push local commits")
+                    .clicked()
+                {
                     if let Some(t) = tab {
                         actions.push(Action::Dialog(push_dialog_for(t)));
                     }
                 }
-                if tool_button(ui, "⟳", "Fetch", 0).clicked() {
+                if theme::ghost_button(ui, "⟳", "Fetch", 0, false)
+                    .on_hover_text("Fetch from all remotes")
+                    .clicked()
+                {
                     actions.push(Action::Run(Op::Fetch));
                 }
-                ui.separator();
-                if tool_button(ui, "⑂", "Branch", 0).clicked() {
+                toolbar_divider(ui);
+                if theme::ghost_button(ui, theme::BRANCH, "Branch", 0, false)
+                    .on_hover_text("Create a new branch")
+                    .clicked()
+                {
                     actions.push(Action::Dialog(Dialog::NewBranch {
                         name: String::new(),
                         start: None,
@@ -780,13 +809,16 @@ impl RustTreeApp {
                         checkout: true,
                     }));
                 }
-                if tool_button(ui, "▤", "Stash", 0).clicked() {
+                if theme::ghost_button(ui, "📦", "Stash", 0, false)
+                    .on_hover_text("Stash all local changes")
+                    .clicked()
+                {
                     actions.push(Action::Dialog(Dialog::Stash {
                         message: String::new(),
                     }));
                 }
-                ui.separator();
-                if tool_button(ui, "↻", "Refresh", 0)
+                toolbar_divider(ui);
+                if theme::ghost_button(ui, "↻", "Refresh", 0, false)
                     .on_hover_text("Reload (F5)")
                     .clicked()
                 {
@@ -800,8 +832,18 @@ impl RustTreeApp {
             });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .selectable_label(self.show_log, "📋 Log")
+                ui.spacing_mut().item_spacing.x = 4.0;
+                match self.github.toolbar_button(ui) {
+                    Some(MenuAction::OpenRemote) => {
+                        self.open_launcher();
+                        self.launcher.mode = LauncherMode::Remote;
+                    }
+                    Some(MenuAction::SignIn) => self.github.open_signin(),
+                    Some(MenuAction::SignOut) => self.github.sign_out(),
+                    None => {}
+                }
+                toolbar_divider(ui);
+                if theme::ghost_button(ui, "📋", "Log", 0, self.show_log)
                     .on_hover_text("Show git command output")
                     .clicked()
                 {
@@ -1026,6 +1068,7 @@ impl RustTreeApp {
     // ------------------------------------------------------------ tabs
 
     fn open_launcher(&mut self) {
+        self.github.invalidate_local();
         self.show_launcher = true;
         self.launcher.focus_search = true;
         self.launcher.query.clear();
@@ -1212,7 +1255,40 @@ impl RustTreeApp {
             .collect();
         self.launcher.scanning = self.scan_rx.is_some();
         let colors = self.tab_colors();
-        let events = tabs::launcher(ui, &mut self.launcher, &self.projects, &open, &colors);
+        let mut remote_events = Vec::new();
+        let github = &mut self.github;
+        let projects = &self.projects;
+        let events = tabs::launcher(
+            ui,
+            &mut self.launcher,
+            projects,
+            &open,
+            &colors,
+            &mut |ui, query| remote_events.extend(github.remote_page(ui, query, projects)),
+        );
+        for e in remote_events {
+            match e {
+                RemoteEvent::Clone { url, name } => {
+                    self.dialog = Some(Dialog::Clone {
+                        url,
+                        parent: self.clone_parent.clone(),
+                        name,
+                    })
+                }
+                RemoteEvent::Open(path) => {
+                    if let Some(i) = self
+                        .tabs
+                        .iter()
+                        .position(|t| t.path.display().to_string() == path)
+                    {
+                        self.select_tab(i);
+                    } else {
+                        self.open_repo(Path::new(&path));
+                    }
+                }
+                RemoteEvent::SignIn => self.github.open_signin(),
+            }
+        }
         for e in events {
             match e {
                 LauncherEvent::Open(path) => {
@@ -1237,7 +1313,7 @@ impl RustTreeApp {
                 LauncherEvent::Clone => {
                     self.dialog = Some(Dialog::Clone {
                         url: String::new(),
-                        parent: dirs_home(),
+                        parent: self.clone_parent.clone(),
                         name: String::new(),
                     })
                 }
@@ -1304,12 +1380,20 @@ impl RustTreeApp {
                 } else {
                     ""
                 };
-                ui.label(RichText::new(format!("⑂ {branch}{detached}")).strong());
+                let p = theme::pal(ui);
+                ui.label(
+                    RichText::new(format!("{} {branch}{detached}", theme::BRANCH))
+                        .color(p.text_strong),
+                );
                 if let Some(b) = tab.head_branch() {
                     if let Some(up) = &b.upstream {
-                        ui.label(
-                            RichText::new(format!("→ {up}  ↑{} ↓{}", b.ahead, b.behind)).weak(),
-                        );
+                        ui.label(RichText::new(format!("→ {up}")).color(p.faint));
+                        if b.ahead > 0 {
+                            ui.label(RichText::new(format!("↑{}", b.ahead)).monospace().color(p.accent_hover));
+                        }
+                        if b.behind > 0 {
+                            ui.label(RichText::new(format!("↓{}", b.behind)).monospace().color(p.orange));
+                        }
                     }
                 }
                 ui.separator();
@@ -1331,10 +1415,10 @@ impl RustTreeApp {
                     ui.add(egui::Spinner::new().size(12.0));
                 }
                 if let Some(e) = &tab.load_error {
-                    ui.colored_label(Color32::from_rgb(230, 90, 80), e);
+                    ui.colored_label(p.red, e);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(tab.path.display().to_string()).weak());
+                    ui.label(RichText::new(tab.path.display().to_string()).color(p.faint));
                 });
             }
         });
@@ -1353,12 +1437,9 @@ impl RustTreeApp {
                     .stick_to_bottom(true)
                     .auto_shrink(false)
                     .show(ui, |ui| {
+                        let p = theme::pal(ui);
                         for entry in &self.log {
-                            let color = if entry.ok {
-                                Color32::from_rgb(90, 190, 110)
-                            } else {
-                                Color32::from_rgb(230, 90, 80)
-                            };
+                            let color = if entry.ok { p.green } else { p.red };
                             ui.label(
                                 RichText::new(format!("[{}] {}", entry.when, entry.title))
                                     .color(color)
@@ -1503,12 +1584,16 @@ impl RustTreeApp {
                     }
                 }
 
-                ui.add_space(8.0);
+                ui.add_space(12.0);
+                let danger = matches!(&dialog, Dialog::Confirm { danger: true, .. });
                 ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(ok_enabled, egui::Button::new(ok_label))
-                        .clicked()
-                    {
+                    let p = theme::pal(ui);
+                    let ok_btn =
+                        egui::Button::new(RichText::new(ok_label).strong().color(p.on_accent))
+                            .fill(if danger { p.red } else { p.accent })
+                            .stroke(egui::Stroke::NONE)
+                            .min_size(egui::vec2(0.0, 28.0));
+                    if ui.add_enabled(ok_enabled, ok_btn).clicked() {
                         match &dialog {
                             Dialog::NewBranch {
                                 name,
@@ -1555,7 +1640,11 @@ impl RustTreeApp {
                             Dialog::Confirm { op, .. } => run = Some(op.clone()),
                         }
                     }
-                    if ui.button("Cancel").clicked() || esc {
+                    if ui
+                        .add(egui::Button::new("Cancel").min_size(egui::vec2(0.0, 28.0)))
+                        .clicked()
+                        || esc
+                    {
                         keep = false;
                     }
                 });
@@ -1569,6 +1658,7 @@ impl RustTreeApp {
             keep = false;
         }
         if let Some((url, parent, name)) = clone {
+            self.clone_parent = parent.display().to_string();
             self.enqueue(None, parent.clone(), JobKind::Clone { url, parent, name });
             keep = false;
         }
@@ -1588,32 +1678,48 @@ impl RustTreeApp {
         }
         let (text, ok) = (text.clone(), *ok);
         let mut dismiss = false;
+        let p = theme::palette(self.dark);
         egui::Area::new(egui::Id::unique("toast"))
-            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 76.0])
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 88.0])
             .show(ctx, |ui| {
-                egui::Frame::popup(ui.style())
-                    .fill(if ok {
-                        Color32::from_rgb(34, 92, 52)
-                    } else {
-                        Color32::from_rgb(120, 36, 36)
+                let color = if ok { p.green } else { p.red };
+                let r = egui::Frame::new()
+                    .fill(p.raised)
+                    .stroke(egui::Stroke::new(1.0, theme::alpha(color, 0.45)))
+                    .corner_radius(10.0)
+                    .shadow(ui.visuals().popup_shadow)
+                    .inner_margin(egui::Margin {
+                        left: 14,
+                        right: 16,
+                        top: 10,
+                        bottom: 10,
                     })
                     .show(ui, |ui| {
-                        ui.set_max_width(460.0);
-                        let r = ui.add(
-                            egui::Label::new(RichText::new(&text).color(Color32::WHITE))
-                                .sense(egui::Sense::click()),
-                        );
-                        if r.clicked() {
-                            dismiss = true;
-                        }
-                        if !ok {
+                        ui.set_max_width(440.0);
+                        ui.horizontal_top(|ui| {
                             ui.label(
-                                RichText::new("Click to dismiss · see 📋 Log for details")
-                                    .small()
-                                    .color(Color32::from_gray(220)),
+                                RichText::new(if ok { "✔" } else { "⚠" })
+                                    .size(15.0)
+                                    .color(color),
                             );
-                        }
+                            ui.vertical(|ui| {
+                                ui.add(
+                                    egui::Label::new(RichText::new(&text).color(p.text_strong))
+                                        .wrap(),
+                                );
+                                if !ok {
+                                    ui.label(
+                                        RichText::new("Click to dismiss · details in Log")
+                                            .small()
+                                            .color(p.faint),
+                                    );
+                                }
+                            });
+                        });
                     });
+                if r.response.interact(egui::Sense::click()).clicked() {
+                    dismiss = true;
+                }
             });
         if dismiss {
             self.toast = None;
@@ -1710,6 +1816,9 @@ impl eframe::App for RustTreeApp {
         self.poll_scan();
         self.poll_ask();
         self.poll_fetch(ctx);
+        for (text, ok) in self.github.poll() {
+            self.notify(text, ok);
+        }
         if self.auto_fetch_min > 0 {
             let every = Duration::from_secs(self.auto_fetch_min as u64 * 60);
             let since = self.last_auto_fetch.elapsed();
@@ -1736,34 +1845,23 @@ impl eframe::App for RustTreeApp {
         self.shortcuts(&ctx, &mut actions);
 
         // Browser-style tab strip on top; the active tab blends into the toolbar below.
-        let strip_bg = if self.dark {
-            Color32::from_gray(18)
-        } else {
-            Color32::from_gray(222)
-        };
+        let p = theme::palette(self.dark);
         egui::Panel::top("tabstrip")
-            .frame(
-                egui::Frame::new()
-                    .fill(strip_bg)
-                    .inner_margin(egui::Margin {
-                        left: 8,
-                        right: 8,
-                        top: 6,
-                        bottom: 0,
-                    }),
-            )
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(p.crust).inner_margin(egui::Margin {
+                left: 8,
+                right: 8,
+                top: 6,
+                bottom: 0,
+            }))
             .show(ui, |ui| self.tab_strip_ui(ui, &ctx));
 
         egui::Panel::top("toolbar")
-            .frame(
-                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 6)),
-            )
+            .frame(theme::panel(p.mantle, 8, 5))
             .show(ui, |ui| self.toolbar(ui, &mut actions));
 
         egui::Panel::bottom("statusbar")
-            .frame(
-                egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin::symmetric(8, 3)),
-            )
+            .frame(theme::panel(p.crust, 12, 4))
             .show(ui, |ui| self.status_bar(ui));
 
         if self.show_launcher || self.tabs.is_empty() {
@@ -1783,6 +1881,7 @@ impl eframe::App for RustTreeApp {
         if self.show_log {
             self.log_window(&ctx);
         }
+        self.github.dialog_ui(&ctx);
         self.credential_dialog(&ctx);
         self.toast_ui(&ctx);
     }
@@ -1799,6 +1898,9 @@ impl eframe::App for RustTreeApp {
             projects: self.projects.clone(),
             dark: Some(self.dark),
             auto_fetch_min: Some(self.auto_fetch_min),
+            github_login: self.github.saved_login(),
+            github_client_id: self.github.saved_client_id(),
+            clone_parent: Some(self.clone_parent.clone()),
         };
         eframe::set_value(storage, STORAGE_KEY, &saved);
     }
@@ -1808,13 +1910,17 @@ impl eframe::App for RustTreeApp {
 // helpers
 // ---------------------------------------------------------------------------
 
-fn tool_button(ui: &mut egui::Ui, icon: &str, label: &str, badge: usize) -> egui::Response {
-    let text = if badge > 0 {
-        format!("{icon} {label} ({badge})")
-    } else {
-        format!("{icon} {label}")
-    };
-    ui.button(RichText::new(text).size(14.0))
+/// Thin vertical divider between toolbar groups.
+fn toolbar_divider(ui: &mut egui::Ui) {
+    let p = theme::pal(ui);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(13.0, 30.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [
+            egui::pos2(rect.center().x, rect.top() + 7.0),
+            egui::pos2(rect.center().x, rect.bottom() - 7.0),
+        ],
+        egui::Stroke::new(1.0, p.border_strong),
+    );
 }
 
 pub fn push_dialog_for(tab: &RepoTab) -> Dialog {

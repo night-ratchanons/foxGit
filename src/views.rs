@@ -1,9 +1,14 @@
 //! Main views: sidebar, history (commit graph) and file status (staging + commit).
 
 use crate::app::{push_dialog_for, Action, Dialog, RepoTab, View};
+use crate::branchtree;
 use crate::diffview;
-use crate::git::{ChangeKind, CommitInfo, DiffTarget, FileChange, Op, RefKind, RefLabel};
+use crate::git::{
+    ChangeKind, CommitInfo, DiffTarget, FileChange, LocalBranch, Op, RefKind, RefLabel,
+    RemoteBranch,
+};
 use crate::graph::{GraphRow, Pos};
+use crate::theme::{self, pal};
 use eframe::egui;
 use egui::{pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke};
 
@@ -24,13 +29,13 @@ pub fn lane_color(i: usize) -> Color32 {
     LANE_COLORS[i % LANE_COLORS.len()]
 }
 
-pub fn kind_color(k: ChangeKind) -> Color32 {
+pub fn kind_color(p: &theme::Palette, k: ChangeKind) -> Color32 {
     match k {
-        ChangeKind::Added | ChangeKind::Untracked => Color32::from_rgb(72, 187, 120),
-        ChangeKind::Modified | ChangeKind::TypeChange => Color32::from_rgb(237, 170, 54),
-        ChangeKind::Deleted => Color32::from_rgb(235, 90, 90),
-        ChangeKind::Renamed => Color32::from_rgb(110, 160, 240),
-        ChangeKind::Conflicted => Color32::from_rgb(240, 60, 200),
+        ChangeKind::Added | ChangeKind::Untracked => p.green,
+        ChangeKind::Modified | ChangeKind::TypeChange => p.yellow,
+        ChangeKind::Deleted => p.red,
+        ChangeKind::Renamed => p.blue,
+        ChangeKind::Conflicted => p.pink,
     }
 }
 
@@ -42,218 +47,285 @@ pub fn format_time(c: &CommitInfo) -> String {
         .unwrap_or_default()
 }
 
-fn section_header(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(8.0);
-    ui.label(RichText::new(text).small().strong().weak());
-    ui.add_space(2.0);
-}
-
 // ---------------------------------------------------------------------------
 // Sidebar
 // ---------------------------------------------------------------------------
 
+const SIDE_ROW_H: f32 = 24.0;
+const TREE_INDENT: f32 = 14.0;
+
+/// One row of the sidebar (nav item, folder, branch, tag, stash).
+struct SideRow<'a> {
+    depth: usize,
+    /// Reserve the disclosure column (tree rows); `caret` = Some(open) for folders.
+    tree: bool,
+    caret: Option<bool>,
+    icon: &'a str,
+    icon_color: Color32,
+    label: &'a str,
+    label_color: Color32,
+    selected: bool,
+    /// Small monospace chips on the right (e.g. "↑2").
+    chips: Vec<(String, Color32)>,
+    /// Count pill on the right.
+    count: Option<usize>,
+}
+
+impl<'a> SideRow<'a> {
+    fn new(ui: &egui::Ui, icon: &'a str, label: &'a str) -> Self {
+        let p = pal(ui);
+        Self {
+            depth: 0,
+            tree: false,
+            caret: None,
+            icon,
+            icon_color: p.subtext,
+            label,
+            label_color: p.text,
+            selected: false,
+            chips: Vec::new(),
+            count: None,
+        }
+    }
+}
+
+fn side_row(ui: &mut egui::Ui, r: SideRow<'_>) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), SIDE_ROW_H), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let p = pal(ui);
+    let painter = ui.painter().clone();
+    if r.selected {
+        painter.rect_filled(rect, 6.0, p.selection);
+        painter.rect_filled(
+            Rect::from_min_size(
+                rect.left_top() + vec2(0.0, 5.0),
+                vec2(3.0, SIDE_ROW_H - 10.0),
+            ),
+            1.5,
+            p.accent,
+        );
+    } else if resp.hovered() {
+        painter.rect_filled(rect, 6.0, p.hover);
+    }
+    let cy = rect.center().y;
+    let mut x = rect.left() + 8.0 + r.depth as f32 * TREE_INDENT;
+    if r.tree {
+        if let Some(open) = r.caret {
+            let c = if resp.hovered() { p.text } else { p.faint };
+            theme::paint_caret(&painter, pos2(x + 4.0, cy), open, c);
+        }
+        x += 13.0;
+    }
+    if !r.icon.is_empty() {
+        painter.text(
+            pos2(x + 7.0, cy),
+            egui::Align2::CENTER_CENTER,
+            r.icon,
+            FontId::proportional(12.5),
+            if r.selected {
+                p.accent_hover
+            } else {
+                r.icon_color
+            },
+        );
+        x += 21.0;
+    }
+
+    // right side: count pill, then chips
+    let mut right = rect.right() - 6.0;
+    if let Some(n) = r.count {
+        let t = n.to_string();
+        let w = theme::pill_width(&painter, &t);
+        theme::paint_pill(&painter, right - w, cy, &t, p.surface1, p.subtext);
+        right -= w + 6.0;
+    }
+    for (t, c) in r.chips.iter().rev() {
+        let g = painter.layout_no_wrap(t.clone(), FontId::monospace(10.5), *c);
+        right -= g.size().x;
+        let gh = g.size().y;
+        painter.galley(pos2(right, cy - gh / 2.0), g, *c);
+        right -= 5.0;
+    }
+
+    let color = if r.selected {
+        p.sel_text
+    } else {
+        r.label_color
+    };
+    let g = painter.layout_no_wrap(r.label.to_string(), FontId::proportional(13.0), color);
+    let clip = Rect::from_min_max(pos2(x, rect.top()), pos2(right - 2.0, rect.bottom()))
+        .intersect(ui.clip_rect());
+    let clipped = g.size().x > clip.width();
+    let gh = g.size().y;
+    painter
+        .with_clip_rect(clip)
+        .galley(pos2(x, cy - gh / 2.0), g, color);
+    if clipped && clip.width() > 12.0 {
+        // fade out instead of a hard cut
+        let bg = if r.selected {
+            p.selection
+        } else if resp.hovered() {
+            p.hover
+        } else {
+            p.mantle
+        };
+        let fade = Rect::from_min_max(
+            pos2(clip.right() - 14.0, rect.top()),
+            pos2(clip.right(), rect.bottom()),
+        );
+        let mut mesh = egui::Mesh::default();
+        mesh.colored_vertex(fade.left_top(), theme::alpha(bg, 0.0));
+        mesh.colored_vertex(fade.right_top(), bg);
+        mesh.colored_vertex(fade.left_bottom(), theme::alpha(bg, 0.0));
+        mesh.colored_vertex(fade.right_bottom(), bg);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 2, 3);
+        painter.add(mesh);
+    }
+    resp
+}
+
+/// Collapsible section header ("BRANCHES 12"). Returns whether it is open.
+fn section(ui: &mut egui::Ui, title: &str, count: usize) -> bool {
+    let id = egui::Id::unique(("sidebar_section", title));
+    let mut open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, true));
+    ui.add_space(10.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::click());
+    let p = pal(ui);
+    let painter = ui.painter();
+    let color = if resp.hovered() { p.text } else { p.faint };
+    let cy = rect.center().y;
+    painter.text(
+        pos2(rect.left() + 8.0, cy),
+        egui::Align2::LEFT_CENTER,
+        title,
+        FontId::proportional(10.5),
+        color,
+    );
+    if resp.hovered() || !open {
+        theme::paint_caret(painter, pos2(rect.right() - 10.0, cy), open, color);
+    }
+    if count > 0 {
+        painter.text(
+            pos2(rect.right() - 22.0, cy),
+            egui::Align2::RIGHT_CENTER,
+            count.to_string(),
+            FontId::proportional(10.5),
+            p.faint,
+        );
+    }
+    if resp.clicked() {
+        open = !open;
+        ui.ctx().data_mut(|d| d.insert_persisted(id, open));
+    }
+    ui.add_space(2.0);
+    open
+}
+
+/// Open state of a tree folder, remembered per repository.
+fn folder_open(ui: &egui::Ui, key: (&str, &str, &str), default: bool) -> (egui::Id, bool) {
+    let id = egui::Id::unique(("branch_folder", key.0, key.1, key.2));
+    let open = ui.ctx().data_mut(|d| *d.get_persisted_mut_or(id, default));
+    (id, open)
+}
+
+fn folder_row(
+    ui: &mut egui::Ui,
+    depth: usize,
+    name: &str,
+    open: bool,
+    count: usize,
+) -> egui::Response {
+    let p = pal(ui);
+    let mut row = SideRow::new(ui, if open { "🗁" } else { "🗀" }, name);
+    row.depth = depth;
+    row.tree = true;
+    row.caret = Some(open);
+    row.icon_color = p.yellow;
+    row.label_color = p.text;
+    row.count = (!open).then_some(count);
+    side_row(ui, row)
+}
+
 pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
+    let p = pal(ui);
     egui::Panel::left("sidebar")
         .resizable(true)
-        .default_size(240.0)
-        .size_range(160.0..=480.0)
+        .default_size(250.0)
+        .size_range(170.0..=480.0)
+        .frame(theme::panel(p.mantle, 8, 6))
         .show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                section_header(ui, "WORKSPACE");
-                let changes = tab.status.staged.len() + tab.status.unstaged.len();
-                let fs_label = if changes > 0 {
-                    format!("📝 File Status  ({changes})")
-                } else {
-                    "📝 File Status".to_string()
-                };
-                if ui
-                    .selectable_label(tab.view == View::FileStatus, fs_label)
-                    .clicked()
-                {
-                    tab.view = View::FileStatus;
-                }
-                if ui
-                    .selectable_label(tab.view == View::History, "🕘 History")
-                    .clicked()
-                {
-                    tab.view = View::History;
-                }
+            egui::ScrollArea::vertical()
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add_space(2.0);
+                    let changes = tab.status.staged.len() + tab.status.unstaged.len();
+                    let mut row = SideRow::new(ui, "📝", "File Status");
+                    row.selected = tab.view == View::FileStatus;
+                    row.count = (changes > 0).then_some(changes);
+                    if side_row(ui, row).clicked() {
+                        tab.view = View::FileStatus;
+                    }
+                    let mut row = SideRow::new(ui, "🕘", "History");
+                    row.selected = tab.view == View::History;
+                    if side_row(ui, row).clicked() {
+                        tab.view = View::History;
+                    }
 
-                section_header(ui, "BRANCHES");
-                let locals = tab.refs.locals.clone();
-                if locals.is_empty() {
-                    ui.label(RichText::new("  (no branches yet)").weak());
-                }
-                for b in &locals {
-                    let mut text = if b.is_head {
-                        RichText::new(format!("● {}", b.name)).strong()
-                    } else {
-                        RichText::new(format!("   {}", b.name))
-                    };
-                    if b.is_head {
-                        text = text.color(Color32::from_rgb(90, 200, 120));
+                    let locals = tab.refs.locals.clone();
+                    if section(ui, "BRANCHES", locals.len()) {
+                        if locals.is_empty() {
+                            empty_row(ui, "No branches yet");
+                        }
+                        let names: Vec<&str> = locals.iter().map(|b| b.name.as_str()).collect();
+                        let tree = branchtree::build(&names);
+                        let head = locals.iter().position(|b| b.is_head);
+                        local_folder(ui, tab, &tree, 0, &locals, head, actions);
                     }
-                    let resp = ui.horizontal(|ui| {
-                        let r = ui.selectable_label(false, text);
-                        if b.ahead > 0 {
-                            ui.label(RichText::new(format!("↑{}", b.ahead)).small().weak());
-                        }
-                        if b.behind > 0 {
-                            ui.label(RichText::new(format!("↓{}", b.behind)).small().weak());
-                        }
-                        r
-                    });
-                    let r = resp.inner;
-                    let r = match &b.upstream {
-                        Some(up) => r.on_hover_text(format!("Tracking {up}\nDouble-click to checkout")),
-                        None => r.on_hover_text("Double-click to checkout"),
-                    };
-                    if r.clicked() {
-                        if let Some(oid) = b.target {
-                            jump_to(tab, oid);
-                        }
-                    }
-                    if r.double_clicked() && !b.is_head {
-                        actions.push(Action::Run(Op::Checkout(b.name.clone())));
-                    }
-                    let current = tab.refs.head_name.clone().unwrap_or_default();
-                    r.context_menu(|ui| {
-                        if ui.add_enabled(!b.is_head, egui::Button::new("Checkout")).clicked() {
-                            actions.push(Action::Run(Op::Checkout(b.name.clone())));
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(
-                                !b.is_head,
-                                egui::Button::new(format!("Merge {} into {current}", b.name)),
-                            )
-                            .clicked()
-                        {
-                            actions.push(Action::Dialog(Dialog::Confirm {
-                                title: "Merge".into(),
-                                text: format!("Merge '{}' into '{current}'?", b.name),
-                                op: Op::Merge(b.name.clone()),
-                                danger: false,
-                            }));
-                            ui.close();
-                        }
-                        if ui
-                            .add_enabled(
-                                !b.is_head,
-                                egui::Button::new(format!("Rebase {current} onto {}", b.name)),
-                            )
-                            .clicked()
-                        {
-                            actions.push(Action::Dialog(Dialog::Confirm {
-                                title: "Rebase".into(),
-                                text: format!("Rebase '{current}' onto '{}'?", b.name),
-                                op: Op::Rebase(b.name.clone()),
-                                danger: true,
-                            }));
-                            ui.close();
-                        }
-                        if b.is_head && ui.button("Push…").clicked() {
-                            actions.push(Action::Dialog(push_dialog_for(tab)));
-                            ui.close();
-                        }
-                        if ui.button("New branch from here…").clicked() {
-                            actions.push(Action::Dialog(Dialog::NewBranch {
-                                name: String::new(),
-                                start: Some(b.name.clone()),
-                                start_label: b.name.clone(),
-                                checkout: true,
-                            }));
-                            ui.close();
-                        }
-                        if ui.button("Copy name").clicked() {
-                            ui.ctx().copy_text(b.name.clone());
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui
-                            .add_enabled(!b.is_head, egui::Button::new("Delete…"))
-                            .clicked()
-                        {
-                            actions.push(Action::Dialog(Dialog::Confirm {
-                                title: "Delete branch".into(),
-                                text: format!(
-                                    "Delete local branch '{}'?\n(Force-deletes even if not merged.)",
-                                    b.name
-                                ),
-                                op: Op::DeleteBranch {
-                                    name: b.name.clone(),
-                                    force: true,
-                                },
-                                danger: true,
-                            }));
-                            ui.close();
-                        }
-                    });
-                }
 
-                section_header(ui, "REMOTES");
-                let remotes = tab.refs.remotes.clone();
-                let names = tab.refs.remote_names.clone();
-                if names.is_empty() {
-                    ui.label(RichText::new("  (no remotes)").weak());
-                }
-                for remote in &names {
-                    egui::CollapsingHeader::new(format!("☁ {remote}"))
-                        .id_salt(("remote", remote))
-                        .default_open(true)
-                        .show(ui, |ui| {
-                            for rb in remotes.iter().filter(|r| &r.remote == remote) {
-                                let r = ui
-                                    .selectable_label(false, &rb.branch)
-                                    .on_hover_text("Double-click to checkout");
-                                if r.clicked() {
-                                    if let Some(oid) = rb.target {
-                                        jump_to(tab, oid);
-                                    }
-                                }
-                                let exists = locals.iter().any(|l| l.name == rb.branch);
-                                let checkout_op = if exists {
-                                    Op::Checkout(rb.branch.clone())
-                                } else {
-                                    Op::CheckoutRemote {
-                                        remote_branch: rb.name.clone(),
-                                        local: rb.branch.clone(),
-                                    }
-                                };
-                                if r.double_clicked() {
-                                    actions.push(Action::Run(checkout_op.clone()));
-                                }
-                                r.context_menu(|ui| {
-                                    if ui.button("Checkout (track)").clicked() {
-                                        actions.push(Action::Run(checkout_op.clone()));
-                                        ui.close();
-                                    }
-                                    if ui.button("Merge into current").clicked() {
-                                        actions.push(Action::Dialog(Dialog::Confirm {
-                                            title: "Merge".into(),
-                                            text: format!("Merge '{}' into the current branch?", rb.name),
-                                            op: Op::Merge(rb.name.clone()),
-                                            danger: false,
-                                        }));
-                                        ui.close();
-                                    }
-                                    if ui.button("Copy name").clicked() {
-                                        ui.ctx().copy_text(rb.name.clone());
-                                        ui.close();
-                                    }
-                                });
+                    let remotes = tab.refs.remotes.clone();
+                    let names = tab.refs.remote_names.clone();
+                    if section(ui, "REMOTES", names.len()) {
+                        if names.is_empty() {
+                            empty_row(ui, "No remotes");
+                        }
+                        let repo_key = tab.path.display().to_string();
+                        for remote in &names {
+                            let rbs: Vec<&RemoteBranch> =
+                                remotes.iter().filter(|r| &r.remote == remote).collect();
+                            let (id, mut open) =
+                                folder_open(ui, (&repo_key, "remote", remote), true);
+                            let mut row = SideRow::new(ui, "☁", remote);
+                            row.tree = true;
+                            row.caret = Some(open);
+                            row.icon_color = p.blue;
+                            row.count = (!open).then_some(rbs.len());
+                            if side_row(ui, row).clicked() {
+                                open = !open;
+                                ui.ctx().data_mut(|d| d.insert_persisted(id, open));
                             }
-                        });
-                }
+                            if open {
+                                let bnames: Vec<&str> =
+                                    rbs.iter().map(|r| r.branch.as_str()).collect();
+                                let tree = branchtree::build(&bnames);
+                                remote_folder(ui, tab, &tree, 1, remote, &rbs, &locals, actions);
+                            }
+                        }
+                    }
 
-                section_header(ui, "TAGS");
-                let tags = tab.refs.tags.clone();
-                egui::CollapsingHeader::new(format!("🏷 Tags ({})", tags.len()))
-                    .id_salt("tags")
-                    .default_open(false)
-                    .show(ui, |ui| {
+                    let tags = tab.refs.tags.clone();
+                    if section(ui, "TAGS", tags.len()) {
+                        if tags.is_empty() {
+                            empty_row(ui, "No tags");
+                        }
                         for (name, oid) in &tags {
-                            let r = ui.selectable_label(false, name);
+                            let mut row = SideRow::new(ui, "🏷", name);
+                            row.icon_color = p.yellow;
+                            let r = side_row(ui, row);
                             if r.clicked() {
                                 jump_to(tab, *oid);
                             }
@@ -262,6 +334,11 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                                     actions.push(Action::Run(Op::CheckoutCommit(name.clone())));
                                     ui.close();
                                 }
+                                if ui.button("Copy name").clicked() {
+                                    ui.ctx().copy_text(name.clone());
+                                    ui.close();
+                                }
+                                ui.separator();
                                 if ui.button("Delete tag…").clicked() {
                                     actions.push(Action::Dialog(Dialog::Confirm {
                                         title: "Delete tag".into(),
@@ -273,49 +350,285 @@ pub fn sidebar(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                                 }
                             });
                         }
-                    });
-
-                section_header(ui, "STASHES");
-                let stashes = tab.refs.stashes.clone();
-                if stashes.is_empty() {
-                    ui.label(RichText::new("  (none)").weak());
-                }
-                for s in &stashes {
-                    let r = ui
-                        .selectable_label(false, format!("▤ {}", s.message))
-                        .on_hover_text("Right-click to apply / pop / drop");
-                    if r.clicked() {
-                        tab.view = View::History;
-                        tab.selected_commit = Some(s.oid);
-                        tab.commit_files = tab.repo.commit_files(s.oid).unwrap_or_default();
-                        let first = tab.commit_files.first().map(|f| f.path.clone());
-                        tab.diff_target = first.map(|path| DiffTarget::Commit { oid: s.oid, path });
-                        tab.reload_diff();
                     }
-                    let i = s.index;
-                    r.context_menu(|ui| {
-                        if ui.button("Apply").clicked() {
-                            actions.push(Action::Run(Op::StashApply(i)));
-                            ui.close();
+
+                    let stashes = tab.refs.stashes.clone();
+                    if section(ui, "STASHES", stashes.len()) {
+                        if stashes.is_empty() {
+                            empty_row(ui, "No stashes");
                         }
-                        if ui.button("Pop (apply & delete)").clicked() {
-                            actions.push(Action::Run(Op::StashPop(i)));
-                            ui.close();
+                        for s in &stashes {
+                            let mut row = SideRow::new(ui, "📦", &s.message);
+                            row.icon_color = p.purple;
+                            let r = side_row(ui, row).on_hover_text(format!(
+                                "stash@{{{}}}: {}\nRight-click to apply / pop / drop",
+                                s.index, s.message
+                            ));
+                            if r.clicked() {
+                                tab.view = View::History;
+                                tab.selected_commit = Some(s.oid);
+                                tab.commit_files = tab.repo.commit_files(s.oid).unwrap_or_default();
+                                let first = tab.commit_files.first().map(|f| f.path.clone());
+                                tab.diff_target =
+                                    first.map(|path| DiffTarget::Commit { oid: s.oid, path });
+                                tab.reload_diff();
+                            }
+                            let i = s.index;
+                            r.context_menu(|ui| {
+                                if ui.button("Apply").clicked() {
+                                    actions.push(Action::Run(Op::StashApply(i)));
+                                    ui.close();
+                                }
+                                if ui.button("Pop (apply & delete)").clicked() {
+                                    actions.push(Action::Run(Op::StashPop(i)));
+                                    ui.close();
+                                }
+                                ui.separator();
+                                if ui.button("Drop…").clicked() {
+                                    actions.push(Action::Dialog(Dialog::Confirm {
+                                        title: "Drop stash".into(),
+                                        text: format!("Delete stash@{{{i}}} permanently?"),
+                                        op: Op::StashDrop(i),
+                                        danger: true,
+                                    }));
+                                    ui.close();
+                                }
+                            });
                         }
-                        if ui.button("Drop…").clicked() {
-                            actions.push(Action::Dialog(Dialog::Confirm {
-                                title: "Drop stash".into(),
-                                text: format!("Delete stash@{{{i}}} permanently?"),
-                                op: Op::StashDrop(i),
-                                danger: true,
-                            }));
-                            ui.close();
-                        }
-                    });
-                }
-                ui.add_space(12.0);
-            });
+                    }
+                    ui.add_space(12.0);
+                });
         });
+}
+
+fn empty_row(ui: &mut egui::Ui, text: &str) {
+    let p = pal(ui);
+    let mut row = SideRow::new(ui, "", text);
+    row.label_color = p.faint;
+    row.tree = true;
+    side_row(ui, row);
+}
+
+fn local_folder(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    f: &branchtree::Folder,
+    depth: usize,
+    locals: &[LocalBranch],
+    head: Option<usize>,
+    actions: &mut Vec<Action>,
+) {
+    let repo_key = tab.path.display().to_string();
+    for sub in &f.folders {
+        let default = head.is_some_and(|h| sub.contains(h));
+        let (id, mut open) = folder_open(ui, (&repo_key, "local", &sub.path), default);
+        if folder_row(ui, depth, &sub.name, open, sub.count())
+            .on_hover_text(format!("{}/ · {} branch(es)", sub.path, sub.count()))
+            .clicked()
+        {
+            open = !open;
+            ui.ctx().data_mut(|d| d.insert_persisted(id, open));
+        }
+        if open {
+            local_folder(ui, tab, sub, depth + 1, locals, head, actions);
+        }
+    }
+    for leaf in &f.leaves {
+        local_branch_row(ui, tab, &locals[leaf.index], &leaf.label, depth, actions);
+    }
+}
+
+fn local_branch_row(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    b: &LocalBranch,
+    label: &str,
+    depth: usize,
+    actions: &mut Vec<Action>,
+) {
+    let p = pal(ui);
+    let mut row = SideRow::new(ui, if b.is_head { "●" } else { theme::BRANCH }, label);
+    row.depth = depth;
+    row.tree = true;
+    if b.is_head {
+        row.icon_color = p.green;
+        row.label_color = p.text_strong;
+    } else {
+        row.icon_color = p.faint;
+    }
+    if b.ahead > 0 {
+        row.chips.push((format!("↑{}", b.ahead), p.accent_hover));
+    }
+    if b.behind > 0 {
+        row.chips.push((format!("↓{}", b.behind), p.orange));
+    }
+    let r = side_row(ui, row);
+    let tip = match &b.upstream {
+        Some(up) => format!("{}\nTracking {up}\nDouble-click to checkout", b.name),
+        None => format!("{}\nDouble-click to checkout", b.name),
+    };
+    let r = r.on_hover_text(tip);
+    if r.clicked() {
+        if let Some(oid) = b.target {
+            jump_to(tab, oid);
+        }
+    }
+    if r.double_clicked() && !b.is_head {
+        actions.push(Action::Run(Op::Checkout(b.name.clone())));
+    }
+    let current = tab.refs.head_name.clone().unwrap_or_default();
+    r.context_menu(|ui| {
+        if ui
+            .add_enabled(!b.is_head, egui::Button::new("Checkout"))
+            .clicked()
+        {
+            actions.push(Action::Run(Op::Checkout(b.name.clone())));
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                !b.is_head,
+                egui::Button::new(format!("Merge {} into {current}", b.name)),
+            )
+            .clicked()
+        {
+            actions.push(Action::Dialog(Dialog::Confirm {
+                title: "Merge".into(),
+                text: format!("Merge '{}' into '{current}'?", b.name),
+                op: Op::Merge(b.name.clone()),
+                danger: false,
+            }));
+            ui.close();
+        }
+        if ui
+            .add_enabled(
+                !b.is_head,
+                egui::Button::new(format!("Rebase {current} onto {}", b.name)),
+            )
+            .clicked()
+        {
+            actions.push(Action::Dialog(Dialog::Confirm {
+                title: "Rebase".into(),
+                text: format!("Rebase '{current}' onto '{}'?", b.name),
+                op: Op::Rebase(b.name.clone()),
+                danger: true,
+            }));
+            ui.close();
+        }
+        if b.is_head && ui.button("Push…").clicked() {
+            actions.push(Action::Dialog(push_dialog_for(tab)));
+            ui.close();
+        }
+        if ui.button("New branch from here…").clicked() {
+            actions.push(Action::Dialog(Dialog::NewBranch {
+                name: String::new(),
+                start: Some(b.name.clone()),
+                start_label: b.name.clone(),
+                checkout: true,
+            }));
+            ui.close();
+        }
+        if ui.button("Copy name").clicked() {
+            ui.ctx().copy_text(b.name.clone());
+            ui.close();
+        }
+        ui.separator();
+        if ui
+            .add_enabled(!b.is_head, egui::Button::new("Delete…"))
+            .clicked()
+        {
+            actions.push(Action::Dialog(Dialog::Confirm {
+                title: "Delete branch".into(),
+                text: format!(
+                    "Delete local branch '{}'?\n(Force-deletes even if not merged.)",
+                    b.name
+                ),
+                op: Op::DeleteBranch {
+                    name: b.name.clone(),
+                    force: true,
+                },
+                danger: true,
+            }));
+            ui.close();
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remote_folder(
+    ui: &mut egui::Ui,
+    tab: &mut RepoTab,
+    f: &branchtree::Folder,
+    depth: usize,
+    remote: &str,
+    rbs: &[&RemoteBranch],
+    locals: &[LocalBranch],
+    actions: &mut Vec<Action>,
+) {
+    let repo_key = tab.path.display().to_string();
+    for sub in &f.folders {
+        let key = format!("{remote}/{}", sub.path);
+        let (id, mut open) = folder_open(ui, (&repo_key, "remote", &key), false);
+        if folder_row(ui, depth, &sub.name, open, sub.count())
+            .on_hover_text(format!(
+                "{remote}/{}/ · {} branch(es)",
+                sub.path,
+                sub.count()
+            ))
+            .clicked()
+        {
+            open = !open;
+            ui.ctx().data_mut(|d| d.insert_persisted(id, open));
+        }
+        if open {
+            remote_folder(ui, tab, sub, depth + 1, remote, rbs, locals, actions);
+        }
+    }
+    let p = pal(ui);
+    for leaf in &f.leaves {
+        let rb = rbs[leaf.index];
+        let mut row = SideRow::new(ui, theme::BRANCH, &leaf.label);
+        row.depth = depth;
+        row.tree = true;
+        row.icon_color = p.faint;
+        let r = side_row(ui, row).on_hover_text(format!("{}\nDouble-click to checkout", rb.name));
+        if r.clicked() {
+            if let Some(oid) = rb.target {
+                jump_to(tab, oid);
+            }
+        }
+        let exists = locals.iter().any(|l| l.name == rb.branch);
+        let checkout_op = if exists {
+            Op::Checkout(rb.branch.clone())
+        } else {
+            Op::CheckoutRemote {
+                remote_branch: rb.name.clone(),
+                local: rb.branch.clone(),
+            }
+        };
+        if r.double_clicked() {
+            actions.push(Action::Run(checkout_op.clone()));
+        }
+        r.context_menu(|ui| {
+            if ui.button("Checkout (track)").clicked() {
+                actions.push(Action::Run(checkout_op.clone()));
+                ui.close();
+            }
+            if ui.button("Merge into current").clicked() {
+                actions.push(Action::Dialog(Dialog::Confirm {
+                    title: "Merge".into(),
+                    text: format!("Merge '{}' into the current branch?", rb.name),
+                    op: Op::Merge(rb.name.clone()),
+                    danger: false,
+                }));
+                ui.close();
+            }
+            if ui.button("Copy name").clicked() {
+                ui.ctx().copy_text(rb.name.clone());
+                ui.close();
+            }
+        });
+    }
 }
 
 fn jump_to(tab: &mut RepoTab, oid: git2::Oid) {
@@ -351,11 +664,11 @@ pub fn history_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Acti
     egui::CentralPanel::default().show(ui, |ui| {
         merge_banner(ui, tab, actions);
         ui.horizontal(|ui| {
-            ui.label("🔍");
             let r = ui.add(
                 egui::TextEdit::singleline(&mut tab.search)
-                    .hint_text("Search message, author or SHA…")
-                    .desired_width(320.0),
+                    .hint_text("🔍  Search message, author or SHA…")
+                    .margin(vec2(10.0, 6.0))
+                    .desired_width(340.0),
             );
             if r.changed() {
                 tab.apply_filter();
@@ -372,7 +685,7 @@ pub fn history_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Acti
                 ui.label(RichText::new("Loading history…").weak());
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         commit_list(ui, tab, actions);
     });
 }
@@ -382,17 +695,19 @@ fn merge_banner(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>)
     if state == git2::RepositoryState::Clean {
         return;
     }
+    let p = pal(ui);
     egui::Frame::new()
-        .fill(Color32::from_rgb(110, 70, 20))
-        .inner_margin(6.0)
-        .corner_radius(4.0)
+        .fill(theme::alpha(p.yellow, 0.12))
+        .stroke(Stroke::new(1.0, theme::alpha(p.yellow, 0.35)))
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .corner_radius(8.0)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "⚠ Repository state: {state:?} — resolve conflicts, then commit."
+                        "⚠  Repository state: {state:?} — resolve conflicts, then commit."
                     ))
-                    .color(Color32::WHITE),
+                    .color(p.yellow),
                 );
                 if state == git2::RepositoryState::Merge && ui.button("Abort merge").clicked() {
                     actions.push(Action::Dialog(Dialog::Confirm {
@@ -404,7 +719,7 @@ fn merge_banner(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>)
                 }
             });
         });
-    ui.add_space(4.0);
+    ui.add_space(6.0);
 }
 
 fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
@@ -425,12 +740,17 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
     let total = wip_rows + n_commits + more_row;
 
     // Header
-    let header_h = 20.0;
+    let header_h = 22.0;
     let (hrect, _) = ui.allocate_exact_size(vec2(ui.available_width(), header_h), Sense::hover());
     let cols = Columns::new(hrect, graph_w);
     let painter = ui.painter();
-    let weak = ui.visuals().weak_text_color();
-    let font = FontId::proportional(12.0);
+    let pl = pal(ui);
+    let weak = pl.faint;
+    let font = FontId::proportional(11.5);
+    painter.line_segment(
+        [hrect.left_bottom(), hrect.right_bottom()],
+        Stroke::new(1.0, pl.border),
+    );
     painter.text(
         pos2(cols.graph.left() + 4.0, hrect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -466,7 +786,7 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         font,
         weak,
     );
-    ui.separator();
+    ui.add_space(2.0);
 
     // Keyboard navigation
     let nav = ui.ctx().memory(|m| m.focused().is_none());
@@ -498,6 +818,7 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
         }
     }
 
+    let pl = pal(ui);
     let mut scroll = egui::ScrollArea::vertical()
         .id_salt("commit_list")
         .auto_shrink(false);
@@ -549,15 +870,24 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
             let selected = tab.selected_commit == Some(commit.oid);
 
             // Background
-            let visuals = ui.visuals();
-            if selected {
-                ui.painter()
-                    .rect_filled(rect, 0.0, visuals.selection.bg_fill);
+            let row_bg = if selected {
+                pl.selection
             } else if resp.hovered() {
-                ui.painter()
-                    .rect_filled(rect, 0.0, visuals.widgets.hovered.weak_bg_fill);
+                pl.hover
             } else if vis % 2 == 1 {
-                ui.painter().rect_filled(rect, 0.0, visuals.faint_bg_color);
+                pl.stripe
+            } else {
+                pl.base
+            };
+            if row_bg != pl.base {
+                ui.painter().rect_filled(rect, 0.0, row_bg);
+            }
+            if selected {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(rect.left_top(), vec2(3.0, rect.height())),
+                    0.0,
+                    pl.accent,
+                );
             }
 
             if show_graph {
@@ -570,22 +900,15 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                     is_head,
                     commit.parents.len() > 1,
                     show_wip && vis == 0 && is_head,
+                    row_bg,
                 );
             } else {
                 ui.painter()
                     .circle_filled(cols.graph.center(), 3.5, lane_color(0));
             }
 
-            let text_color = if selected {
-                Color32::WHITE
-            } else {
-                ui.visuals().text_color()
-            };
-            let weak = if selected {
-                Color32::from_gray(225)
-            } else {
-                ui.visuals().weak_text_color()
-            };
+            let text_color = if selected { pl.sel_text } else { pl.text };
+            let weak = if selected { pl.text } else { pl.subtext };
 
             // Description: ref badges + summary
             let mut x = cols.desc.left();
@@ -619,7 +942,13 @@ fn commit_list(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) 
                 FontId::proportional(12.5),
                 weak,
             );
-            clipped_text(ui, cols.hash, &commit.short, FontId::monospace(12.5), weak);
+            clipped_text(
+                ui,
+                cols.hash,
+                &commit.short,
+                FontId::monospace(12.0),
+                if selected { pl.text } else { pl.faint },
+            );
 
             let resp = resp.on_hover_text_at_pointer(format!(
                 "{}\n\n{} <{}>\n{}",
@@ -818,11 +1147,12 @@ fn clipped_text(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: Colo
 }
 
 fn paint_badge(ui: &egui::Ui, label: &RefLabel, x: f32, cy: f32, max_x: f32) -> f32 {
-    let (bg, fg, prefix) = match label.kind {
-        RefKind::Head => (Color32::from_rgb(56, 161, 105), Color32::WHITE, "✔ "),
-        RefKind::Local => (Color32::from_rgb(47, 133, 90), Color32::WHITE, ""),
-        RefKind::Remote => (Color32::from_rgb(90, 103, 216), Color32::WHITE, "☁ "),
-        RefKind::Tag => (Color32::from_rgb(214, 158, 46), Color32::BLACK, "🏷 "),
+    let p = pal(ui);
+    let (color, prefix) = match label.kind {
+        RefKind::Head => (p.green, "✔ "),
+        RefKind::Local => (p.green, ""),
+        RefKind::Remote => (p.purple, "☁ "),
+        RefKind::Tag => (p.yellow, "🏷 "),
     };
     if x + 30.0 > max_x {
         return x;
@@ -830,23 +1160,35 @@ fn paint_badge(ui: &egui::Ui, label: &RefLabel, x: f32, cy: f32, max_x: f32) -> 
     let text = format!("{prefix}{}", label.name);
     let galley = ui
         .painter()
-        .layout_no_wrap(text, FontId::proportional(11.5), fg);
-    let w = (galley.size().x + 10.0).min(max_x - x - 4.0);
+        .layout_no_wrap(text, FontId::proportional(11.5), color);
+    let w = (galley.size().x + 12.0).min(max_x - x - 4.0);
     let rect = Rect::from_min_size(pos2(x, cy - 9.0), vec2(w, 18.0));
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    painter.rect_filled(rect, 4.0, bg);
-    painter.galley(
-        pos2(rect.left() + 5.0, cy - galley.size().y / 2.0),
-        galley,
-        fg,
+    let head = label.kind == RefKind::Head;
+    painter.rect_filled(
+        rect,
+        5.0,
+        theme::alpha(color, if head { 0.26 } else { 0.15 }),
     );
-    x + w + 4.0
+    painter.rect_stroke(
+        rect,
+        5.0,
+        Stroke::new(1.0, theme::alpha(color, if head { 0.8 } else { 0.4 })),
+        egui::StrokeKind::Inside,
+    );
+    painter.galley(
+        pos2(rect.left() + 6.0, cy - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    x + w + 5.0
 }
 
 fn lane_x(rect: Rect, lane: usize) -> f32 {
     rect.left() + 6.0 + lane as f32 * LANE_W + LANE_W / 2.0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_graph(
     ui: &egui::Ui,
     rect: Rect,
@@ -854,6 +1196,7 @@ fn paint_graph(
     is_head: bool,
     is_merge: bool,
     wip_above: bool,
+    row_bg: Color32,
 ) {
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     let y = |p: Pos| match p {
@@ -890,24 +1233,30 @@ fn paint_graph(
         })
         .map(|s| lane_color(s.color))
         .unwrap_or(lane_color(row.lane));
+    let pl = pal(ui);
     if wip_above {
-        // dashed connector up to the "Uncommitted changes" row
-        painter.line_segment([pos2(c.x, rect.top()), c], Stroke::new(1.5, Color32::GRAY));
+        // connector up to the "Uncommitted changes" row
+        painter.line_segment([pos2(c.x, rect.top()), c], Stroke::new(1.5, pl.faint));
     }
+    // a ring in the row color separates the node from the lines running through it
     if is_head {
-        painter.circle_filled(c, 5.5, Color32::WHITE);
+        painter.circle_filled(c, 7.5, row_bg);
+        painter.circle_filled(c, 5.5, row_bg);
         painter.circle_stroke(c, 5.5, Stroke::new(2.5, color));
+        painter.circle_filled(c, 2.2, color);
     } else if is_merge {
+        painter.circle_filled(c, 5.0, row_bg);
         painter.circle_filled(c, 3.5, color);
     } else {
+        painter.circle_filled(c, 6.0, row_bg);
         painter.circle_filled(c, 4.5, color);
     }
 }
 
 fn paint_wip_row(ui: &egui::Ui, rect: Rect, cols: &Columns, tab: &RepoTab, resp: &egui::Response) {
+    let pl = pal(ui);
     if resp.hovered() {
-        ui.painter()
-            .rect_filled(rect, 0.0, ui.visuals().widgets.hovered.weak_bg_fill);
+        ui.painter().rect_filled(rect, 0.0, pl.hover);
     }
     let lane = tab.graph.first().map(|_| {
         // Put the WIP node above HEAD's lane if HEAD is the first commit, else lane 0.
@@ -925,14 +1274,12 @@ fn paint_wip_row(ui: &egui::Ui, rect: Rect, cols: &Columns, tab: &RepoTab, resp:
         .map(|c| Some(c.oid) == tab.refs.head_oid)
         .unwrap_or(false);
     if head_is_first {
-        ui.painter().line_segment(
-            [c, pos2(c.x, rect.bottom())],
-            Stroke::new(1.5, Color32::GRAY),
-        );
+        ui.painter()
+            .line_segment([c, pos2(c.x, rect.bottom())], Stroke::new(1.5, pl.faint));
     }
-    ui.painter().circle_filled(c, 5.0, ui.visuals().panel_fill);
+    ui.painter().circle_filled(c, 5.0, pl.base);
     ui.painter()
-        .circle_stroke(c, 5.0, Stroke::new(2.0, Color32::GRAY));
+        .circle_stroke(c, 5.0, Stroke::new(2.0, pl.orange));
     let n = tab.status.staged.len() + tab.status.unstaged.len();
     clipped_text(
         ui,
@@ -942,15 +1289,9 @@ fn paint_wip_row(ui: &egui::Ui, rect: Rect, cols: &Columns, tab: &RepoTab, resp:
             if n == 1 { "" } else { "s" }
         ),
         FontId::proportional(13.5),
-        ui.visuals().strong_text_color(),
+        pl.orange,
     );
-    clipped_text(
-        ui,
-        cols.hash,
-        "*",
-        FontId::monospace(12.5),
-        ui.visuals().weak_text_color(),
-    );
+    clipped_text(ui, cols.hash, "*", FontId::monospace(12.0), pl.faint);
 }
 
 fn commit_details(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
@@ -1056,11 +1397,16 @@ pub fn file_row(
                 clicked_btn = true;
             }
         }
-        ui.label(
-            RichText::new(f.kind.letter())
-                .monospace()
-                .strong()
-                .color(kind_color(f.kind)),
+        let p = pal(ui);
+        let kc = kind_color(p, f.kind);
+        let (br, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+        ui.painter().rect_filled(br, 5.0, theme::alpha(kc, 0.16));
+        ui.painter().text(
+            br.center(),
+            egui::Align2::CENTER_CENTER,
+            f.kind.letter(),
+            FontId::monospace(11.0),
+            kc,
         );
         let (dir, name) = match f.path.rsplit_once('/') {
             Some((d, n)) => (format!("{d}/"), n.to_string()),
@@ -1068,9 +1414,9 @@ pub fn file_row(
         };
         let mut job = egui::text::LayoutJob::default();
         let (base, weak) = if selected {
-            (Color32::WHITE, Color32::from_gray(215))
+            (p.sel_text, p.text)
         } else {
-            (ui.visuals().text_color(), ui.visuals().weak_text_color())
+            (p.text, p.faint)
         };
         let font = FontId::proportional(13.0);
         job.append(&name, 0.0, egui::TextFormat::simple(font.clone(), base));
@@ -1109,7 +1455,9 @@ pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<
 
             // Staged
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Staged files ({})", tab.status.staged.len())).strong());
+                let p = pal(ui);
+                ui.label(RichText::new("Staged files").strong().color(p.text_strong));
+                ui.label(RichText::new(tab.status.staged.len().to_string()).color(p.faint));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
                         .add_enabled(!tab.status.staged.is_empty(), egui::Button::new("Unstage all"))
@@ -1155,7 +1503,9 @@ pub fn file_status_view(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<
             ui.add_space(8.0);
             // Unstaged
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("Unstaged files ({})", tab.status.unstaged.len())).strong());
+                let p = pal(ui);
+                ui.label(RichText::new("Unstaged files").strong().color(p.text_strong));
+                ui.label(RichText::new(tab.status.unstaged.len().to_string()).color(p.faint));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let any = !tab.status.unstaged.is_empty();
                     if ui.add_enabled(any, egui::Button::new("Stage all")).clicked() {
@@ -1248,13 +1598,20 @@ fn commit_box(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
     ui.add_space(4.0);
     let branch = tab.refs.head_name.clone().unwrap_or_else(|| "HEAD".into());
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("Commit to ⑂ {branch}")).strong());
+        let p = pal(ui);
+        ui.label(RichText::new("Commit to").color(p.subtext));
+        ui.label(
+            RichText::new(format!("{} {branch}", theme::BRANCH))
+                .strong()
+                .color(p.text_strong),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(RichText::new("Ctrl+Enter to commit").weak().small());
         });
     });
     let editor = egui::TextEdit::multiline(&mut tab.commit_msg)
         .hint_text("Commit message (first line = summary)")
+        .margin(vec2(10.0, 8.0))
         .desired_width(f32::INFINITY)
         .desired_rows(3);
     let avail = (ui.available_height() - 36.0).max(40.0);
@@ -1277,12 +1634,12 @@ fn commit_box(ui: &mut egui::Ui, tab: &mut RepoTab, actions: &mut Vec<Action>) {
         }
         ui.checkbox(&mut tab.push_after_commit, "Push changes immediately");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let btn = egui::Button::new(RichText::new("  Commit  ").strong()).fill(if can_commit {
-                Color32::from_rgb(38, 110, 200)
+            let label = if tab.push_after_commit {
+                "  Commit & Push  "
             } else {
-                ui.visuals().widgets.inactive.bg_fill
-            });
-            if ui.add_enabled(can_commit, btn).clicked() || (shortcut && can_commit) {
+                "  Commit  "
+            };
+            if theme::primary_button(ui, label, can_commit).clicked() || (shortcut && can_commit) {
                 actions.push(Action::Run(Op::Commit {
                     message: tab.commit_msg.trim_end().to_string() + "\n",
                     amend: tab.amend,
